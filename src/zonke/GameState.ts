@@ -94,12 +94,16 @@ export interface WinCheck {
   gameOver: boolean;
   winner?: PlayerState;
   reason?: string;
+  // No row left to fight over, and the score is tied - not a draw, a cue to reset every
+  // row and keep playing until someone actually pulls ahead.
+  suddenDeath?: boolean;
 }
 
 /**
  * Downing a row takes that slot out of play for both sides, so the ten rows are a pool the
- * two players race each other for. The game is decided once no row is still contested, or
- * as soon as the rows left cannot close the gap.
+ * two players race each other for. The game is decided once someone has a lead the rows
+ * left can no longer close - a tied score with nothing left to contest is never a final
+ * result, only a signal to reset the board and keep going.
  */
 export function checkWin(p1: PlayerState, p2: PlayerState): WinCheck {
   const contested = p1.deadRows.filter((dead, i) => !dead && !p2.deadRows[i]).length;
@@ -112,7 +116,7 @@ export function checkWin(p1: PlayerState, p2: PlayerState): WinCheck {
   }
   if (contested === 0) {
     if (p1.kills === p2.kills) {
-      return { gameOver: true, reason: `Every row is down - ${p1.kills} all, tie game!` };
+      return { gameOver: false, suddenDeath: true };
     }
     const winner = p1.kills > p2.kills ? p1 : p2;
     return { gameOver: true, winner, reason: `${winner.name} wins on rows taken!` };

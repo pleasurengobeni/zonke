@@ -784,6 +784,20 @@ export class ZonkeScene extends Phaser.Scene {
       return;
     }
 
+    if (win.suddenDeath) {
+      // Never a draw: every row is spoken for and the score is level, so the board is
+      // wiped clean - figures, bullets, and every row's dead flag - and play continues.
+      // Kills carry over; only the board itself resets.
+      this.players.forEach((p) => p.deadRows.fill(false));
+      this.resetBoard();
+      this.pickBonusRow();
+      this.ensureLifeline();
+      this.redrawAll();
+      this.messageText.setText(
+        `${this.players[0].kills} all with no rows left - sudden death! Board reset.`
+      );
+    }
+
     if (!this.bonusJustHit) {
       this.bonusTurnsLeft -= 1;
       if (this.bonusTurnsLeft <= 0) this.pickBonusRow();
