@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { track } from '../analytics';
 import {
   ROWS,
   BULLET_STEPS,
@@ -332,6 +333,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-ONE', () => this.chooseMode(0), this);
     this.input.keyboard!.on('keydown-TWO', () => this.chooseMode(1), this);
     this.input.keyboard!.on('keydown-THREE', () => this.chooseMode(2), this);
+    this.input.keyboard!.on('keydown-FOUR', () => this.startTimeAttack(), this);
 
     // Touch/mouse: press-and-hold anywhere on the board to charge, same as holding SPACE.
     // Tapping while the game is over restarts, so there is no keyboard-only control left.
@@ -373,17 +375,29 @@ export class ZonkeScene extends Phaser.Scene {
 
     const btnW = Math.min(560 * S, panelW * 0.9);
     const btnH = 52 * S;
-    const buttonPairs = MODES.map((m, i) => {
+    const pickerButtons: { label: string; color: string; onClick: () => void }[] = [
+      ...MODES.map((m, i) => ({
+        label: `${i + 1}   ${m.name}`,
+        color: '#ffd54f',
+        onClick: () => this.chooseMode(i),
+      })),
+      {
+        label: '4   Time Attack (solo, 60s)',
+        color: '#4fc3f7',
+        onClick: () => this.startTimeAttack(),
+      },
+    ];
+    const buttonPairs = pickerButtons.map(({ label: text, color, onClick }) => {
       const btn = this.add
         .rectangle(CENTER_X, 0, btnW, btnH, 0xffffff, 0.06)
         .setStrokeStyle(1, 0xffd54f, 0.5)
         .setInteractive({ useHandCursor: true });
       const label = this.add
-        .text(CENTER_X, 0, `${i + 1}   ${m.name}`, { fontSize: fs(28), color: '#ffd54f' })
+        .text(CENTER_X, 0, text, { fontSize: fs(26), color })
         .setOrigin(0.5, 0.5);
       btn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
         event.stopPropagation();
-        this.chooseMode(i);
+        onClick();
       });
       return { btn, label };
     });
@@ -468,11 +482,18 @@ export class ZonkeScene extends Phaser.Scene {
   private chooseMode(index: number): void {
     if (this.mode) return;
     this.mode = MODES[index];
+    track('mode_selected', { mode: this.mode.name });
     this.modeUi.forEach((o) => o.destroy());
     this.modeUi = [];
     this.turnText.setText("Player 1's turn");
     this.messageText.setText('Hold to charge, release to launch');
     this.armBall();
+  }
+
+  private startTimeAttack(): void {
+    if (this.mode) return;
+    track('mode_selected', { mode: 'TimeAttack' });
+    this.scene.start('TimeAttackScene');
   }
 
   private drawHeader(): void {
@@ -781,6 +802,12 @@ export class ZonkeScene extends Phaser.Scene {
       this.gameOver = true;
       this.gameOverText.setText(`${win.reason ?? 'Game over'}  (tap, or press R, to restart)`);
       this.turnText.setText('Game Over');
+      track('game_over', {
+        mode: this.mode?.name,
+        result: win.winner === this.players[0] ? 'p1_win' : win.winner === this.players[1] ? 'cpu_win' : 'tie',
+        p1Kills: this.players[0].kills,
+        cpuKills: this.players[1].kills,
+      });
       return;
     }
 

@@ -25,3 +25,32 @@ services:
       interval: 30s
       timeout: 3s
       retries: 3
+
+  api:
+    build: ./api
+    image: zonkegame-api
+    container_name: zonkegame-api
+    restart: unless-stopped
+    # Same convention as web: localhost only, host nginx is the sole public hop.
+    ports:
+      - "127.0.0.1:4000:4000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    # Named volume, not a bind mount or the container's own writable layer - `docker
+    # compose up -d --build` on every deploy recreates the container from scratch, which
+    # would silently wipe the SQLite file (scores and every collected stat) without this.
+    volumes:
+      - zonkegame_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:4000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  zonkegame_data:
