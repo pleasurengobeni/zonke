@@ -201,6 +201,21 @@ export class ZonkeScene extends Phaser.Scene {
   private laidOutH = 0;
   private resizeTimer?: Phaser.Time.TimerEvent;
 
+  // A random row flashes gold every few turns; landing on it (not via ZONKE) processes
+  // that landing twice - a smaller, more frequent jackpot alongside the ZONKE one.
+  private bonusRow: number | null = null;
+  private bonusTurnsLeft = 0;
+  private bonusHighlight!: Phaser.GameObjects.Rectangle;
+  private bonusJustHit = false;
+
+  // A second, independent flashing row that only helps whichever player is currently
+  // behind on kills - a comeback chance, not a universal bonus. Multiplier is random
+  // (2x or 3x) each time it appears, and shown as text so it's never a guess.
+  private lifelineRow: number | null = null;
+  private lifelineMultiplier = 2;
+  private lifelineHighlight!: Phaser.GameObjects.Rectangle;
+  private lifelineLabel!: Phaser.GameObjects.Text;
+
   constructor() {
     super('ZonkeScene');
   }
@@ -242,6 +257,44 @@ export class ZonkeScene extends Phaser.Scene {
     fitLabel(this.killTexts[1], MARGIN_R - gutter * 2);
 
     this.drawHeader();
+
+    // Created before the cell pool so its text and figures draw on top of this wash, not
+    // under it - the highlight is a background tint, not something that should cover marks.
+    // Fill alpha of 1 here, not a dim value - the tween below drives the actual visible
+    // opacity via the GameObject's own .alpha, and the two multiply together. Baking a low
+    // fill alpha in AND tweening .alpha compounds to under 4% opacity - invisible in
+    // practice, which is exactly what shipped here the first time.
+    this.bonusHighlight = this.add
+      .rectangle(0, 0, ROWS.length * CELL_W, ROW_H, 0xffd54f, 1)
+      .setOrigin(0.5);
+    this.tweens.add({
+      targets: this.bonusHighlight,
+      alpha: { from: 0.08, to: 0.3 },
+      duration: 650,
+      yoyo: true,
+      repeat: -1,
+    });
+    this.pickBonusRow();
+
+    // A different colour from the universal bonus row, since this one only does anything
+    // for whoever is currently behind - it should read as distinct at a glance.
+    this.lifelineHighlight = this.add
+      .rectangle(0, 0, ROWS.length * CELL_W, ROW_H, 0xff9800, 1)
+      .setOrigin(0.5)
+      .setVisible(false);
+    this.tweens.add({
+      targets: this.lifelineHighlight,
+      alpha: { from: 0.1, to: 0.34 },
+      duration: 500,
+      yoyo: true,
+      repeat: -1,
+    });
+    this.lifelineLabel = this.add
+      .text(0, 0, '', { fontSize: fs(22), color: '#ffb74d', fontStyle: 'bold' })
+      .setOrigin(0.5)
+      .setVisible(false);
+    this.ensureLifeline();
+
     this.createCellPool();
 
     this.ballRestY = TABLE_BOTTOM + 26 * S;
@@ -348,7 +401,7 @@ export class ZonkeScene extends Phaser.Scene {
       .text(
         CENTER_X,
         0,
-        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits.',
+        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind.',
         { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S, wordWrap: { width: textW } }
       )
       .setOrigin(0.5, 0);
@@ -717,6 +770,9 @@ export class ZonkeScene extends Phaser.Scene {
         ? `Too much power - the wall threw it back. ${outcome.message}`
         : outcome.message
     );
+    // Kills may have just changed, so re-check who (if anyone) is behind and needs a
+    // lifeline - appears the moment someone pulls ahead, gone once it's even again.
+    this.ensureLifeline();
 
     this.redrawAll();
 
@@ -728,6 +784,11 @@ export class ZonkeScene extends Phaser.Scene {
       return;
     }
 
+    if (!this.bonusJustHit) {
+      this.bonusTurnsLeft -= 1;
+      if (this.bonusTurnsLeft <= 0) this.pickBonusRow();
+    }
+
     this.activeIndex = 1 - activeIndexAtLaunch;
     this.turnText.setText(`${this.players[this.activeIndex].name}'s turn`);
     this.turnText.setColor(this.activeIndex === 0 ? P1_COLOR : P2_COLOR);
@@ -737,6 +798,58 @@ export class ZonkeScene extends Phaser.Scene {
   private resetBoard(): void {
     this.rowBullets = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
     this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
+  }
+
+  /** Moves the flashing bonus row somewhere new and resets its countdown. */
+  private pickBonusRow(): void {
+    let next = this.bonusRow;
+    do {
+      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
+    } while (MAX_VISIBLE_ROWS > 1 && (next === this.bonusRow || next === this.lifelineRow));
+    this.bonusRow = next;
+    this.bonusTurnsLeft = Phaser.Math.Between(3, 6);
+    this.bonusHighlight.setPosition(
+      GRID_LEFT + (ROWS.length * CELL_W) / 2,
+      LOG_TOP + this.bonusRow * ROW_H + ROW_H / 2
+    );
+  }
+
+  /**
+   * The lifeline only exists while the two players' kill counts differ - a comeback chance
+   * for whoever is behind, not something either side sees when the game is even. Called
+   * after every turn, so it appears the moment someone pulls ahead and disappears again if
+   * the trailing side catches all the way back up.
+   */
+  private ensureLifeline(): void {
+    const [p1, p2] = this.players;
+    if (!p1 || !p2 || p1.kills === p2.kills) {
+      this.lifelineRow = null;
+      this.lifelineHighlight.setVisible(false);
+      this.lifelineLabel.setVisible(false);
+      return;
+    }
+    if (this.lifelineRow === null) this.pickLifelineRow();
+  }
+
+  private pickLifelineRow(): void {
+    let next: number;
+    do {
+      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
+    } while (MAX_VISIBLE_ROWS > 1 && (next === this.bonusRow || next === this.lifelineRow));
+    this.lifelineRow = next;
+    // "Reasonable double or triple" - random each time, and always shown as a number rather
+    // than left for the player to guess at.
+    this.lifelineMultiplier = Phaser.Math.Between(2, 3);
+    const x = GRID_LEFT + (ROWS.length * CELL_W) / 2;
+    const y = LOG_TOP + this.lifelineRow * ROW_H + ROW_H / 2;
+    this.lifelineHighlight.setPosition(x, y).setVisible(true);
+    this.lifelineLabel.setText(`${this.lifelineMultiplier}x`).setPosition(x, y).setVisible(true);
+  }
+
+  /** Whichever player currently has fewer kills - who the lifeline is for, if it exists. */
+  private isTrailing(playerIndex: 0 | 1): boolean {
+    const opponent = this.players[1 - playerIndex];
+    return this.players[playerIndex].kills < opponent.kills;
   }
 
   /**
@@ -767,32 +880,65 @@ export class ZonkeScene extends Phaser.Scene {
 
     let drew = 0;
     let last: TurnOutcome | null = null;
+    let bonusHit = false;
+    let lifelineMultiplierHit = 0;
 
     live.forEach((row) => {
-      if (this.rowFigureParts[row][playerIndex] < FIGURE_PARTS.length) {
-        this.rowFigureParts[row][playerIndex] += 1;
-        drew += 1;
-        return;
+      // The bonus row is its own small jackpot, separate from ZONKE - landing on it
+      // (directly, not via a ZONKE that already hits every row) processes the landing
+      // twice, which can carry a figure straight through completion into its first bullet
+      // step, or fire an already-loaded gun immediately. The lifeline only fires for
+      // whoever is currently behind - the other player can land on that row with no effect.
+      let times = 1;
+      if (result !== 'ZONKE') {
+        if (row === this.bonusRow) {
+          times = 2;
+          bonusHit = true;
+        } else if (row === this.lifelineRow && this.isTrailing(playerIndex)) {
+          times = this.lifelineMultiplier;
+          lifelineMultiplierHit = this.lifelineMultiplier;
+        }
       }
-      const outcome = advanceBullet(
-        active,
-        opponent,
-        row,
-        this.rowBullets[row][playerIndex],
-        playerIndex
-      );
-      this.rowBullets[row][playerIndex] = Math.min(
-        BULLET_STEPS,
-        this.rowBullets[row][playerIndex] + 1
-      );
-      last = outcome;
+      for (let i = 0; i < times; i++) {
+        if (opponent.deadRows[row] || active.deadRows[row]) break;
+        if (this.rowFigureParts[row][playerIndex] < FIGURE_PARTS.length) {
+          this.rowFigureParts[row][playerIndex] += 1;
+          drew += 1;
+          continue;
+        }
+        const outcome = advanceBullet(
+          active,
+          opponent,
+          row,
+          this.rowBullets[row][playerIndex],
+          playerIndex
+        );
+        this.rowBullets[row][playerIndex] = Math.min(
+          BULLET_STEPS,
+          this.rowBullets[row][playerIndex] + 1
+        );
+        last = outcome;
+      }
     });
+
+    // The bonus is consumed the moment someone actually lands on it, rather than waiting
+    // out its normal countdown - claiming it is what makes a new one appear.
+    if (bonusHit) this.pickBonusRow();
+    this.bonusJustHit = bonusHit;
+    // Consumed on use, same as the regular bonus - ensureLifeline() (called after this, in
+    // resolveLaunch) re-picks it only if whoever used it is still behind afterwards.
+    if (lifelineMultiplierHit > 0) this.lifelineRow = null;
+    const prefix = bonusHit
+      ? '2x row! '
+      : lifelineMultiplierHit > 0
+        ? `${lifelineMultiplierHit}x LIFELINE! `
+        : '';
 
     if (last) {
       const fired = last as TurnOutcome;
       return drew > 0
-        ? { ...fired, message: `${fired.message} (+${drew} row(s) drew a part)` }
-        : fired;
+        ? { ...fired, message: `${prefix}${fired.message} (+${drew} row(s) drew a part)` }
+        : { ...fired, message: `${prefix}${fired.message}` };
     }
 
     const part = FIGURE_PARTS[this.rowFigureParts[live[0]][playerIndex] - 1];
@@ -805,7 +951,7 @@ export class ZonkeScene extends Phaser.Scene {
       message:
         result === 'ZONKE'
           ? `${active.name} hit ZONKE - ${drew} row(s) drew their next part!`
-          : `${active.name} landed on row ${rowLabel(slot)} - drew ${part}`,
+          : `${prefix}${active.name} landed on row ${rowLabel(slot)} - drew ${part}`,
     };
   }
 
