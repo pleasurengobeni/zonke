@@ -152,7 +152,7 @@ export class ZonkeScene extends Phaser.Scene {
       .setOrigin(0.5, 0);
 
     this.messageText = this.add
-      .text(CENTER_X, turnY + 32, 'Hold SPACE to charge, release to launch', {
+      .text(CENTER_X, turnY + 32, 'Hold to charge, release to launch', {
         fontSize: '21px',
         color: '#cccccc',
       })
@@ -178,6 +178,18 @@ export class ZonkeScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-TWO', () => this.chooseMode(1), this);
     this.input.keyboard!.on('keydown-THREE', () => this.chooseMode(2), this);
 
+    // Touch/mouse: press-and-hold anywhere on the board to charge, same as holding SPACE.
+    // Tapping while the game is over restarts, so there is no keyboard-only control left.
+    this.input.on('pointerdown', () => {
+      if (this.gameOver) {
+        this.restartGame();
+        return;
+      }
+      this.onChargeStart();
+    });
+    this.input.on('pointerup', this.onRelease, this);
+    this.input.on('pointerupoutside', this.onRelease, this);
+
     this.redrawAll();
 
     if (this.mode) {
@@ -197,14 +209,24 @@ export class ZonkeScene extends Phaser.Scene {
         fontStyle: 'bold',
       })
       .setOrigin(0.5, 0);
-    const lines = MODES.map((m, i) =>
-      this.add
-        .text(CENTER_X, midY - 88 + i * 46, `${i + 1}   ${m.name}`, {
-          fontSize: '28px',
-          color: '#ffd54f',
-        })
-        .setOrigin(0.5, 0)
-    );
+    // Each option is a tappable button, not just a keyboard shortcut - sized generously
+    // since this has to work as a touch target on a phone with no keyboard at all.
+    const buttons = MODES.map((m, i) => {
+      const y = midY - 92 + i * 60;
+      const btn = this.add
+        .rectangle(CENTER_X, y + 18, 560, 52, 0xffffff, 0.06)
+        .setStrokeStyle(1, 0xffd54f, 0.5)
+        .setInteractive({ useHandCursor: true });
+      const label = this.add
+        .text(CENTER_X, y, `${i + 1}   ${m.name}`, { fontSize: '28px', color: '#ffd54f' })
+        .setOrigin(0.5, 0);
+      btn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+        event.stopPropagation();
+        this.chooseMode(i);
+      });
+      return [btn, label];
+    });
+    const lines = buttons.flat();
     const hint = this.add
       .text(CENTER_X, midY + 66, 'Harder modes charge faster and the CPU aims better', {
         fontSize: '18px',
@@ -230,7 +252,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.modeUi.forEach((o) => o.destroy());
     this.modeUi = [];
     this.turnText.setText("Player 1's turn");
-    this.messageText.setText('Hold SPACE to charge, release to launch');
+    this.messageText.setText('Hold to charge, release to launch');
     this.armBall();
   }
 
@@ -535,7 +557,7 @@ export class ZonkeScene extends Phaser.Scene {
     const win = checkWin(this.players[0], this.players[1]);
     if (win.gameOver) {
       this.gameOver = true;
-      this.gameOverText.setText(`${win.reason ?? 'Game over'}  (press R to restart)`);
+      this.gameOverText.setText(`${win.reason ?? 'Game over'}  (tap, or press R, to restart)`);
       this.turnText.setText('Game Over');
       return;
     }
