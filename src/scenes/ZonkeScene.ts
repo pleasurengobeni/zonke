@@ -1,15 +1,15 @@
 import Phaser from 'phaser';
 import {
   ROWS,
-  EDGE_ROWS,
+  BULLET_STEPS,
   FIGURE_PARTS,
   createPlayer,
-  applyBullet,
+  advanceBullet,
+  rowLabel,
   checkWin,
   type PlayerState,
   type LaunchResult,
   type Row,
-  type TurnResultKind,
   type TurnOutcome,
 } from '../zonke/GameState';
 
@@ -64,17 +64,13 @@ const TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
 const APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2; // centre of row 1
 const APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5); // travel from row 1 to just inside the ZONKE band
 
-/** A mark sitting in the cell a ball came to rest in. */
-interface CellMark {
-  result: LaunchResult;
-  kind: TurnResultKind;
-}
+
 
 export class ZonkeScene extends Phaser.Scene {
   private players!: [PlayerState, PlayerState];
   private activeIndex = 0;
-  // Everything a turn draws goes in the cell the ball landed in: [rowSlot][0=p1/1=p2][col]
-  private boardMarks: (CellMark | undefined)[][][] = [];
+  // How far each row's bullet has stepped across the letters: [rowSlot][0=p1/1=p2]
+  private rowBullets: number[][] = [];
 
   private killTexts: [Phaser.GameObjects.Text, Phaser.GameObjects.Text] = [
     null as any,
@@ -121,7 +117,7 @@ export class ZonkeScene extends Phaser.Scene {
   create(): void {
     this.players = [createPlayer('Player 1'), createPlayer('CPU')];
     this.activeIndex = 0;
-    this.resetBoardMarks();
+    this.resetBoard();
     this.gameOver = false;
 
     this.add
@@ -163,7 +159,7 @@ export class ZonkeScene extends Phaser.Scene {
       .text(
         400,
         turnY + 100,
-        'More power = further up. Stop in the ZONKE band for the jackpot - overshoot and the wall throws you back.',
+        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits.',
         { fontSize: '11px', color: '#888888' }
       )
       .setOrigin(0.5, 0);
@@ -265,11 +261,11 @@ export class ZonkeScene extends Phaser.Scene {
 
     ROWS.forEach((row, i) => {
       const cx = GRID_LEFT + i * CELL_W + CELL_W / 2;
-      const isEdge = EDGE_ROWS.includes(row);
+      const isLast = i === ROWS.length - 1;
       this.add
         .text(cx, HEADER_TOP + 36, row, {
           fontSize: '18px',
-          color: isEdge ? KILL_COLOR : '#ffffff',
+          color: isLast ? KILL_COLOR : '#ffffff',
           fontStyle: 'bold',
         })
         .setOrigin(0.5, 0);
@@ -492,10 +488,9 @@ export class ZonkeScene extends Phaser.Scene {
     const result: LaunchResult = jackpot ? 'ZONKE' : (ROWS[this.columnUnderBall()] as Row);
     const knockedBack = this.hitWall && !jackpot;
     const slot = this.rowSlotUnderBall();
-    const col = this.columnUnderBall();
 
     this.time.delayedCall(450, () => {
-      this.resolveLaunch(this.activeIndex as 0 | 1, result, slot, col, knockedBack);
+      this.resolveLaunch(this.activeIndex as 0 | 1, result, slot, knockedBack);
     });
   }
 
@@ -503,13 +498,12 @@ export class ZonkeScene extends Phaser.Scene {
     activeIndexAtLaunch: 0 | 1,
     result: LaunchResult,
     slot: number,
-    col: number,
     overCharged = false
   ): void {
     const active = this.players[activeIndexAtLaunch];
     const opponent = this.players[1 - activeIndexAtLaunch];
 
-    const outcome = this.applyToBoard(activeIndexAtLaunch, result, slot, col, active, opponent);
+    const outcome = this.applyToBoard(activeIndexAtLaunch, result, slot, active, opponent);
     this.messageText.setText(
       overCharged
         ? `Too much power - the wall threw it back. ${outcome.message}`
@@ -532,68 +526,70 @@ export class ZonkeScene extends Phaser.Scene {
     this.armBall();
   }
 
-  private resetBoardMarks(): void {
-    this.boardMarks = Array.from({ length: MAX_VISIBLE_ROWS }, () =>
-      [0, 1].map(() => ROWS.map(() => undefined as CellMark | undefined))
-    );
+  private resetBoard(): void {
+    this.rowBullets = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
     this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
   }
 
   /**
-   * A row shoots only once its own figure is finished and holding a gun; until then a
-   * landing there draws that figure's next part instead. A ZONKE applies that to every row
-   * at once, so some rows may gain a part while the finished ones fire.
+   * A landing works one row (or every row, on a ZONKE). While that row's figure is unfinished
+   * it draws the next part; once the figure is holding a gun the row's bullet steps one
+   * letter further across the board, and clearing H is what actually hits the opponent.
    */
   private applyToBoard(
     playerIndex: 0 | 1,
     result: LaunchResult,
     slot: number,
-    col: number,
     active: PlayerState,
     opponent: PlayerState
   ): TurnOutcome {
     const slots =
       result === 'ZONKE' ? Array.from({ length: MAX_VISIBLE_ROWS }, (_row, i) => i) : [slot];
+    const live = slots.filter((row) => !opponent.deadRows[row]);
 
-    const armed = slots.filter(
-      (s) => this.rowFigureParts[s][playerIndex] >= FIGURE_PARTS.length
-    );
-    const building = slots.filter(
-      (s) => this.rowFigureParts[s][playerIndex] < FIGURE_PARTS.length
-    );
-
-    building.forEach((s) => {
-      this.rowFigureParts[s][playerIndex] += 1;
-    });
-
-    // Only the rows already holding a gun shoot, and they fire once between them - bullets
-    // and downed columns are per column, so firing per row would cascade on a single turn.
-    if (armed.length > 0) {
-      const outcome = applyBullet(active, opponent, ROWS[col] as Row);
-      armed.forEach((s) => {
-        this.boardMarks[s][playerIndex][col] = { result, kind: outcome.kind };
-      });
-      if (building.length > 0) {
-        return {
-          ...outcome,
-          message: `${outcome.message} (+${building.length} row(s) drew a part)`,
-        };
-      }
-      return outcome;
+    if (live.length === 0) {
+      return {
+        kind: 'row-already-dead',
+        result,
+        message: `Row ${rowLabel(slot)} on ${opponent.name} is already down - no effect.`,
+      };
     }
 
-    const finished = building.filter(
-      (s) => this.rowFigureParts[s][playerIndex] === FIGURE_PARTS.length
-    ).length;
+    let drew = 0;
+    let last: TurnOutcome | null = null;
+
+    live.forEach((row) => {
+      if (this.rowFigureParts[row][playerIndex] < FIGURE_PARTS.length) {
+        this.rowFigureParts[row][playerIndex] += 1;
+        drew += 1;
+        return;
+      }
+      const outcome = advanceBullet(active, opponent, row, this.rowBullets[row][playerIndex]);
+      this.rowBullets[row][playerIndex] = Math.min(
+        BULLET_STEPS,
+        this.rowBullets[row][playerIndex] + 1
+      );
+      last = outcome;
+    });
+
+    if (last) {
+      const fired = last as TurnOutcome;
+      return drew > 0
+        ? { ...fired, message: `${fired.message} (+${drew} row(s) drew a part)` }
+        : fired;
+    }
+
+    const part = FIGURE_PARTS[this.rowFigureParts[live[0]][playerIndex] - 1];
     return {
-      kind: finished > 0 ? 'figure-completed' : 'part-drawn',
+      kind:
+        this.rowFigureParts[live[0]][playerIndex] === FIGURE_PARTS.length
+          ? 'figure-completed'
+          : 'part-drawn',
       result,
       message:
         result === 'ZONKE'
-          ? `${active.name} hit ZONKE - every row drew its next part!`
-          : `${active.name} landed on row ${MAX_VISIBLE_ROWS - slot} - drew ${
-              FIGURE_PARTS[this.rowFigureParts[slot][playerIndex] - 1]
-            }`,
+          ? `${active.name} hit ZONKE - ${drew} row(s) drew their next part!`
+          : `${active.name} landed on row ${rowLabel(slot)} - drew ${part}`,
     };
   }
 
@@ -611,13 +607,21 @@ export class ZonkeScene extends Phaser.Scene {
     this.miniFigureGfx.forEach((row) => row.forEach((g) => g.clear()));
     this.bulletGfx.clear();
 
-    // Every mark stays in the cell its ball landed in, so the board fills up as it is played.
-    this.boardMarks.forEach((row, slot) =>
-      row.forEach((sub, subIndex) =>
-        sub.forEach((mark, col) => {
-          if (mark) this.paintMark(slot, subIndex as 0 | 1, col, mark);
-        })
-      )
+    // A bullet is one dash per letter, laid down from the shooter's own side of the board.
+    this.rowBullets.forEach((row, slot) =>
+      row.forEach((steps, sub) => {
+        if (steps > 0) this.drawBulletTrack(slot, sub as 0 | 1, steps);
+      })
+    );
+
+    // A row that has been shot shows the hit on the far side from whoever fired.
+    this.players.forEach((p, i) =>
+      p.deadRows.forEach((dead, slot) => {
+        if (!dead) return;
+        const shooterSub = (1 - i) as 0 | 1;
+        const endCol = shooterSub === 0 ? ROWS.length - 1 : 0;
+        this.cellTextPool[slot][i][endCol].setText('X').setColor(KILL_COLOR);
+      })
     );
 
     // One figure per row, in the margin level with that row, on that player's side. Each
@@ -637,39 +641,22 @@ export class ZonkeScene extends Phaser.Scene {
     );
   }
 
-  private paintMark(slot: number, sub: 0 | 1, col: number, mark: CellMark): void {
-    const t = this.cellTextPool[slot][sub][col];
-
-    switch (mark.kind) {
-      case 'bullet-loaded':
-        this.drawBulletTrack(slot, sub, col, sub === 0 ? P1_COLOR_HEX : P2_COLOR_HEX);
-        break;
-      case 'kill':
-      case 'instant-hit':
-        this.drawBulletTrack(slot, sub, col, 0xff5252);
-        t.setText('X').setColor(KILL_COLOR);
-        break;
-      case 'row-already-dead':
-        t.setText('\u00B7').setColor(NEUTRAL_COLOR);
-        break;
-    }
-  }
-
   /**
-   * A fired bullet is a single line leaving the shooter's own side of the board and running
-   * across their row towards the opponent, stopping at the column it reached.
+   * One dash per letter the bullet has reached, running from the shooter's own side towards
+   * the opponent: player 1 lays them down from A onwards, the CPU back from H.
    */
-  private drawBulletTrack(slot: number, sub: 0 | 1, col: number, color: number): void {
+  private drawBulletTrack(slot: number, sub: 0 | 1, steps: number): void {
     const g = this.bulletGfx;
     const y = LOG_TOP + slot * ROW_H + sub * SUB_H + SUB_H / 2;
-    const tip = GRID_LEFT + col * CELL_W + CELL_W / 2;
-    // Player 1 shoots left to right from column A; player 2 shoots back from column H.
-    const from = sub === 0 ? GRID_LEFT + 2 : GRID_LEFT + ROWS.length * CELL_W - 2;
+    const color = sub === 0 ? P1_COLOR_HEX : P2_COLOR_HEX;
+    const dash = CELL_W * 0.42;
 
-    g.lineStyle(2, color, 0.9);
-    g.lineBetween(from, y, tip, y);
-    g.fillStyle(color, 1);
-    g.fillCircle(tip, y, 3);
+    g.lineStyle(3, color, 0.95);
+    for (let i = 0; i < steps; i++) {
+      const col = sub === 0 ? i : ROWS.length - 1 - i;
+      const cx = GRID_LEFT + col * CELL_W + CELL_W / 2;
+      g.lineBetween(cx - dash / 2, y, cx + dash / 2, y);
+    }
   }
 
   private drawMiniFigure(
