@@ -45,7 +45,7 @@ interface Mode {
 const MODES: Mode[] = [
   { name: 'Easy', zonkeBand: 95, chargeMs: 1900, jitter: 0, cpuAim: 0.1, cpuError: 0.6 },
   { name: 'Moderate', zonkeBand: 55, chargeMs: 1300, jitter: 0.04, cpuAim: 0.45, cpuError: 0.18 },
-  { name: 'Hard', zonkeBand: 31, chargeMs: 1000, jitter: 0.08, cpuAim: 0.75, cpuError: 0.06 },
+  { name: 'Hard', zonkeBand: 31, chargeMs: 1000, jitter: 0.08, cpuAim: 0.6, cpuError: 0.1 },
 ];
 
 const P1_COLOR = '#4caf50';
