@@ -16,17 +16,17 @@ import {
 // The ball is shot up the board and friction bleeds its momentum away until it stops -
 // wherever it comes to rest IS the result. It never falls back down; the only thing that
 // turns it around is the wall above the ZONKE row.
-const FRICTION = 0.21; // speed scrubbed off every 16ms frame
+const FRICTION = 0.3; // speed scrubbed off every 16ms frame
 const STOP_SPEED = 0.35; // below this the ball has come to rest
 const WALL_BOUNCE = 0.85; // energy kept bouncing off a wall (sides, and the one above ZONKE)
 const BOUNCE_SPREAD = 1.0; // how wide the wall can kick the ball off (radians either side)
 const POWER_MAX = 1.55; // 1.0 reaches row 10; past that is the ZONKE band, then the wall
-const BALL_R = 8;
+const BALL_R = 12;
 
 
 interface Mode {
   name: string;
-  wallY: number; // the wall sits lower in harder modes, leaving a thinner ZONKE band
+  zonkeBand: number; // px of resting room above row 10 - thinner is harder
   chargeMs: number; // a faster bar makes that band a shorter moment in real time
   jitter: number; // random power the shot picks up on release
   cpuAim: number; // how often the CPU actually goes for the jackpot
@@ -37,9 +37,9 @@ interface Mode {
 // 10, and the bar charges faster so that room passes sooner. Measured windows are roughly
 // 365ms of a 1900ms charge on Easy, 156ms of 1300ms on Moderate, 65ms of 1000ms on Hard.
 const MODES: Mode[] = [
-  { name: 'Easy', wallY: 103, chargeMs: 1900, jitter: 0, cpuAim: 0.1, cpuError: 0.6 },
-  { name: 'Moderate', wallY: 125, chargeMs: 1300, jitter: 0.04, cpuAim: 0.45, cpuError: 0.18 },
-  { name: 'Hard', wallY: 138, chargeMs: 1000, jitter: 0.08, cpuAim: 0.75, cpuError: 0.06 },
+  { name: 'Easy', zonkeBand: 95, chargeMs: 1900, jitter: 0, cpuAim: 0.1, cpuError: 0.6 },
+  { name: 'Moderate', zonkeBand: 55, chargeMs: 1300, jitter: 0.04, cpuAim: 0.45, cpuError: 0.18 },
+  { name: 'Hard', zonkeBand: 31, chargeMs: 1000, jitter: 0.08, cpuAim: 0.75, cpuError: 0.06 },
 ];
 
 const P1_COLOR = '#4caf50';
@@ -49,16 +49,22 @@ const P2_COLOR_HEX = 0x2196f3;
 const KILL_COLOR = '#ff5252';
 const NEUTRAL_COLOR = '#888888';
 
-const CANVAS_W = 900;
+// Phaser fits the canvas to the window, so how big the board looks is really the board's
+// share of the canvas. Chrome is kept tight and the board given the rest.
+// Phaser fits the canvas to the window, so the board's share of the canvas is what decides
+// how big it looks. Height is the scarce axis - ten rows have to fit - so chrome above and
+// below is kept tight, while the table spends the width the screen has going spare.
+const CANVAS_W = 1500;
 const CENTER_X = CANVAS_W / 2;
-const CELL_W = 60;
+const CELL_W = 132;
 const GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
-const HEADER_TOP = 95;
-const HEADER_H = 60;
-const ROW_H = 58; // full row height, sized so a figure fits between rows without crowding
+const GRID_RIGHT = GRID_LEFT + ROWS.length * CELL_W;
+const HEADER_TOP = 10;
+const HEADER_H = 110;
+const ROW_H = 88; // full row height, sized so a figure fits between rows without crowding
 // The figures live out in the margins, one per row per side, lined up with the row centre.
-const FIGURE_X: [number, number] = [GRID_LEFT / 2, (GRID_LEFT + ROWS.length * CELL_W + CANVAS_W) / 2];
-const FIGURE_SCALE = 1.3;
+const FIGURE_X: [number, number] = [GRID_LEFT / 2, (GRID_RIGHT + CANVAS_W) / 2];
+const FIGURE_SCALE = 2.2;
 const SUB_H = ROW_H / 2;
 const MAX_VISIBLE_ROWS = 10;
 const LOG_TOP = HEADER_TOP + HEADER_H;
@@ -125,49 +131,37 @@ export class ZonkeScene extends Phaser.Scene {
     this.resetBoard();
     this.gameOver = false;
 
-    this.add
-      .text(CENTER_X, 12, 'ZONKE', { fontSize: '26px', color: '#ffffff', fontStyle: 'bold' })
-      .setOrigin(0.5, 0);
-
-    this.add.text(FIGURE_X[0], 40, 'Player 1', { fontSize: '15px', color: P1_COLOR }).setOrigin(0.5, 0);
-    this.add.text(FIGURE_X[1], 40, 'CPU', { fontSize: '15px', color: P2_COLOR }).setOrigin(0.5, 0);
+    this.add.text(FIGURE_X[0], 6, 'Player 1', { fontSize: '30px', color: P1_COLOR }).setOrigin(0.5, 0);
+    this.add.text(FIGURE_X[1], 6, 'CPU', { fontSize: '24px', color: P2_COLOR }).setOrigin(0.5, 0);
 
     this.killTexts = [
-      this.add.text(FIGURE_X[0], 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
-      this.add.text(FIGURE_X[1], 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
+      this.add.text(FIGURE_X[0], 38, 'Kills: 0', { fontSize: '20px', color: '#ffd54f' }).setOrigin(0.5, 0),
+      this.add.text(FIGURE_X[1], 38, 'Kills: 0', { fontSize: '20px', color: '#ffd54f' }).setOrigin(0.5, 0),
     ];
 
     this.drawHeader();
     this.createCellPool();
 
-    this.ballRestY = TABLE_BOTTOM + 30;
-    this.ball = this.add.circle(0, 0, 8, 0xffd54f);
+    this.ballRestY = TABLE_BOTTOM + 26;
+    this.ball = this.add.circle(0, 0, BALL_R, 0xffd54f);
     this.positionBallAtRest();
 
-    const turnY = this.ballRestY + 30;
+    const turnY = this.ballRestY + 28;
     this.turnText = this.add
-      .text(CENTER_X, turnY, "Player 1's turn", { fontSize: '20px', color: P1_COLOR })
+      .text(CENTER_X, turnY, "Player 1's turn", { fontSize: '24px', color: P1_COLOR })
       .setOrigin(0.5, 0);
 
     this.messageText = this.add
-      .text(CENTER_X, turnY + 30, 'Hold SPACE to charge, release to launch', {
-        fontSize: '14px',
+      .text(CENTER_X, turnY + 32, 'Hold SPACE to charge, release to launch', {
+        fontSize: '21px',
         color: '#cccccc',
       })
       .setOrigin(0.5, 0);
 
     this.gameOverText = this.add
-      .text(CENTER_X, turnY + 65, '', { fontSize: '18px', color: '#ffeb3b', fontStyle: 'bold' })
+      .text(CENTER_X, turnY + 62, '', { fontSize: '28px', color: '#ffeb3b', fontStyle: 'bold' })
       .setOrigin(0.5, 0);
 
-    this.add
-      .text(
-        CENTER_X,
-        turnY + 100,
-        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits.',
-        { fontSize: '11px', color: '#888888' }
-      )
-      .setOrigin(0.5, 0);
 
     this.columnHighlight = this.add
       .rectangle(0, HEADER_TOP, CELL_W, TABLE_BOTTOM - HEADER_TOP, 0xffffff, 0.12)
@@ -194,22 +188,38 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   private showModePicker(): void {
-    const panel = this.add.rectangle(CENTER_X, 445, 470, 215, 0x000000, 0.85).setOrigin(0.5);
+    const midY = (LOG_TOP + TABLE_BOTTOM) / 2;
+    const panel = this.add.rectangle(CENTER_X, midY, 720, 360, 0x000000, 0.88).setOrigin(0.5);
     const title = this.add
-      .text(CENTER_X, 362, 'Choose difficulty', { fontSize: '22px', color: '#ffffff', fontStyle: 'bold' })
+      .text(CENTER_X, midY - 150, 'Choose difficulty', {
+        fontSize: '34px',
+        color: '#ffffff',
+        fontStyle: 'bold',
+      })
       .setOrigin(0.5, 0);
     const lines = MODES.map((m, i) =>
       this.add
-        .text(CENTER_X, 408 + i * 34, `${i + 1}   ${m.name}`, { fontSize: '18px', color: '#ffd54f' })
+        .text(CENTER_X, midY - 88 + i * 46, `${i + 1}   ${m.name}`, {
+          fontSize: '28px',
+          color: '#ffd54f',
+        })
         .setOrigin(0.5, 0)
     );
     const hint = this.add
-      .text(CENTER_X, 518, 'Harder modes charge faster and the CPU aims better', {
-        fontSize: '12px',
+      .text(CENTER_X, midY + 66, 'Harder modes charge faster and the CPU aims better', {
+        fontSize: '18px',
         color: '#aaaaaa',
       })
       .setOrigin(0.5, 0);
-    this.modeUi = [panel, title, hint, ...lines];
+    const rules = this.add
+      .text(
+        CENTER_X,
+        midY + 104,
+        'Land on a row to draw its figure. Once it holds a gun, each\nlanding steps its bullet one letter - past H it hits.',
+        { fontSize: '17px', color: '#888888', align: 'center', lineSpacing: 6 }
+      )
+      .setOrigin(0.5, 0);
+    this.modeUi = [panel, title, hint, rules, ...lines];
     this.turnText.setText('');
     this.messageText.setText('');
   }
@@ -247,8 +257,8 @@ export class ZonkeScene extends Phaser.Scene {
       // Row position label: bottom row = 1, counting upward to MAX_VISIBLE_ROWS at the top.
       const rowNumber = MAX_VISIBLE_ROWS - r;
       this.add
-        .text(GRID_LEFT - 14, y + ROW_H / 2, String(rowNumber), {
-          fontSize: '13px',
+        .text(GRID_LEFT - 20, y + ROW_H / 2, String(rowNumber), {
+          fontSize: '20px',
           color: '#777777',
         })
         .setOrigin(1, 0.5);
@@ -257,8 +267,8 @@ export class ZonkeScene extends Phaser.Scene {
     // The header row IS the ZONKE row - "ZONKE" sits on its own line on top, bigger and clear
     // of the column letters/numbers stacked below it, so nothing overlaps.
     this.add
-      .text(GRID_LEFT + tableWidth / 2, HEADER_TOP + 4, 'ZONKE', {
-        fontSize: '26px',
+      .text(GRID_LEFT + tableWidth / 2, HEADER_TOP + 8, 'ZONKE', {
+        fontSize: '42px',
         color: '#ffd54f',
         fontStyle: 'bold',
       })
@@ -268,8 +278,8 @@ export class ZonkeScene extends Phaser.Scene {
       const cx = GRID_LEFT + i * CELL_W + CELL_W / 2;
       const isLast = i === ROWS.length - 1;
       this.add
-        .text(cx, HEADER_TOP + 36, row, {
-          fontSize: '18px',
+        .text(cx, HEADER_TOP + 64, row, {
+          fontSize: '30px',
           color: isLast ? KILL_COLOR : '#ffffff',
           fontStyle: 'bold',
         })
@@ -290,7 +300,7 @@ export class ZonkeScene extends Phaser.Scene {
         ROWS.forEach((_row, i) => {
           const cx = GRID_LEFT + i * CELL_W + CELL_W / 2;
           const t = this.add
-            .text(cx, y, '', { fontSize: '16px', color: NEUTRAL_COLOR })
+            .text(cx, y, '', { fontSize: '26px', color: NEUTRAL_COLOR })
             .setOrigin(0.5, 0);
           subTexts.push(t);
         });
@@ -356,7 +366,7 @@ export class ZonkeScene extends Phaser.Scene {
     // The band moves with the wall, so the CPU has to aim at this mode's band, not a fixed
     // spot - otherwise a lower wall would make it worse rather than better.
     const low = (APEX_FLOOR_Y - LOG_TOP) / APEX_SPAN;
-    const high = (APEX_FLOOR_Y - this.mode.wallY) / APEX_SPAN;
+    const high = (APEX_FLOOR_Y - this.wallY()) / APEX_SPAN;
     const target = (low + high) / 2;
     // On easier modes it mostly just takes a shot; on Hard it nearly always goes for ZONKE.
     const goesForIt = Math.random() < this.mode.cpuAim;
@@ -444,7 +454,7 @@ export class ZonkeScene extends Phaser.Scene {
 
     // The wall above ZONKE is the one thing that sends it back. Whatever momentum it still
     // had going up now carries it back down, so the harder you overshot, the lower you land.
-    const wall = this.mode!.wallY;
+    const wall = this.wallY();
     if (this.ballY < wall) {
       this.ballY = wall;
       // Coming off the wall is the only thing that sends the ball sideways: whatever
@@ -460,6 +470,11 @@ export class ZonkeScene extends Phaser.Scene {
       this.ballY = this.ballRestY;
       this.ballVy = -Math.abs(this.ballVy) * WALL_BOUNCE;
     }
+  }
+
+  /** The wall the ball bounces off: the band's top, never above the board's own top edge. */
+  private wallY(): number {
+    return Math.max(LOG_TOP - this.mode!.zonkeBand, HEADER_TOP + BALL_R);
   }
 
   private highlightColumnUnderBall(): void {
