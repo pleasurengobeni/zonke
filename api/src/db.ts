@@ -55,3 +55,13 @@ if (!scoreColumns.some((c) => c.name === 'mode')) {
 // digits) and a Time Attack run in points (tens), so ranking them against each other would
 // be meaningless.
 db.exec(`CREATE INDEX IF NOT EXISTS idx_scores_mode_score ON scores(mode, score DESC)`);
+
+// Whether that run was actually won. It cannot be inferred from kills and time - a player
+// can finish a long match with four kills and still lose - so the fastest-win board needs
+// it recorded at submission. Rows that predate the column stay 0: unknown, not a win.
+const scoreColumns2 = db.prepare('PRAGMA table_info(scores)').all() as { name: string }[];
+if (!scoreColumns2.some((c) => c.name === 'won')) {
+  db.exec('ALTER TABLE scores ADD COLUMN won INTEGER NOT NULL DEFAULT 0');
+}
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_scores_fastest ON scores(mode, won, duration_ms ASC)');

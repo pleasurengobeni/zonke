@@ -8,14 +8,17 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:layout": "node scripts/check-layout.mjs",
-    "test:features": "node scripts/check-features.mjs"
+    "test:features": "node scripts/check-features.mjs",
+    "test:3d": "node scripts/check-3d.mjs"
   },
   "devDependencies": {
+    "@types/three": "^0.169.0",
     "playwright": "^1.63.0",
     "typescript": "^5.6.2",
     "vite": "^5.4.8"
   },
   "dependencies": {
-    "phaser": "^3.85.2"
+    "phaser": "^3.85.2",
+    "three": "^0.169.0"
   }
 }

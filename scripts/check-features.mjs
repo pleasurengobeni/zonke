@@ -69,6 +69,57 @@ for (const [label, w, h] of sizes) {
   if (clock2 === state.clock) fail(`clock is not ticking (${clock2})`);
   console.log(`  clock ticked ${state.clock} -> ${clock2}`);
 
+  // 3b. No horizontal line inside a row. Read the real pixels rather than trust the
+  // screenshot: a strip down the middle of column A is sampled at each row's divider, at
+  // the half-height where the old sub-line ran, and at a blank quarter of the same row.
+  // The divider is the control - if that does not read as bright, the sampling is wrong.
+  const lines = await page.evaluate(async () => {
+    const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    const l = s.actorLayout();
+    const x = Math.round(l.gridLeft + l.cellW * 0.5);
+    const w = 3;
+    const h = Math.round(l.rowH * 10);
+    const img = await new Promise((resolve) =>
+      window.zonkeGame.renderer.snapshotArea(x, Math.round(l.logTop), w, h, resolve)
+    );
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    const brightness = (row) => {
+      const y = Math.max(0, Math.min(h - 1, row));
+      let sum = 0;
+      for (let i = 0; i < w; i++) {
+        const o = (y * w + i) * 4;
+        sum += data[o] + data[o + 1] + data[o + 2];
+      }
+      return sum / (w * 3);
+    };
+    const rows = [];
+    for (let r = 1; r < 10; r++) {
+      rows.push({
+        r,
+        divider: brightness(Math.round(r * l.rowH)),
+        mid: brightness(Math.round(r * l.rowH + l.rowH / 2)),
+        blank: brightness(Math.round(r * l.rowH + l.rowH * 0.28)),
+      });
+    }
+    return rows;
+  });
+  const control = lines.filter((row) => row.divider > row.blank + 25);
+  if (control.length < 5) {
+    fail(`pixel sampling is not detecting row dividers, so it cannot prove anything: ${JSON.stringify(lines[0])}`);
+  } else {
+    const withLine = lines.filter((row) => row.mid > row.blank + 12);
+    if (withLine.length) {
+      fail(`${withLine.length} rows still have a line across the middle: ${JSON.stringify(withLine[0])}`);
+    } else {
+      console.log(`  no mid-row lines (dividers read +${Math.round(control[0].divider - control[0].blank)} brightness, mid-row +${Math.round(lines[0].mid - lines[0].blank)})`);
+    }
+  }
+
   // 4. Open a green row the way the game does, then aim a shot at the row it chose.
   const split = await page.evaluate(async () => {
     const s = window.zonkeGame.scene.getScene('ZonkeScene');
@@ -175,8 +226,16 @@ for (const [label, w, h] of sizes) {
     return s.children.list.filter((o) => o.type === 'Text' && o.depth >= 20).map((t) => t.text);
   });
   if (!after.some((t) => t.includes('Score saved'))) fail(`score not saved: ${JSON.stringify(after)}`);
-  if (!after.some((t) => t.includes('Top runs'))) fail('leaderboard did not load after saving');
-  else console.log('  leaderboard: ' + after.find((t) => t.includes('Top runs')).replace(/\n/g, ' | '));
+  const board = after.find((t) => t.includes('Fastest wins'));
+  if (!board) fail(`fastest-wins board did not load after saving: ${JSON.stringify(after.slice(-3))}`);
+  else {
+    console.log('  leaderboard: ' + board.replace(/\n/g, ' | '));
+    // The run just saved was a win, so it has to be on the fastest board.
+    if (!/Ntsako/.test(board)) fail('the win just saved is missing from the fastest-wins board');
+    // Times must climb down the list - that is the whole ordering.
+    const times = [...board.matchAll(/(\d+):(\d\d)/g)].map((m) => Number(m[1]) * 60 + Number(m[2]));
+    if (times.some((t, i) => i > 0 && t < times[i - 1])) fail(`fastest-wins list is not sorted: ${times}`);
+  }
 
   if (errors.length) fail('console errors: ' + errors.join(' | '));
   await page.close();

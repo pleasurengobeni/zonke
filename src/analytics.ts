@@ -44,17 +44,21 @@ export type ScoreMode = 'timeattack' | 'zonke';
  * Returns whether the score actually made it, so the UI can tell the player the truth
  * instead of showing "Saved!" over a request that never landed.
  */
-export async function submitScore(
-  name: string,
-  score: number,
-  durationMs: number,
-  mode: ScoreMode = 'timeattack'
-): Promise<boolean> {
+export interface ScoreSubmission {
+  name: string;
+  score: number;
+  durationMs: number;
+  mode?: ScoreMode;
+  /** Whether the run was won - what the fastest-wins board is built from. */
+  won?: boolean;
+}
+
+export async function submitScore(entry: ScoreSubmission): Promise<boolean> {
   try {
     const res = await fetch('/api/scores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, score, durationMs, mode }),
+      body: JSON.stringify({ mode: 'timeattack', won: false, ...entry }),
     });
     return res.ok;
   } catch {
@@ -68,12 +72,21 @@ export interface TopScore {
   score: number;
   durationMs: number;
   mode?: ScoreMode;
+  won?: 0 | 1;
   createdAt: string;
 }
 
-export async function fetchTopScores(limit = 10, mode?: ScoreMode): Promise<TopScore[]> {
+/**
+ * `sort: 'fastest'` returns the quickest WON runs, shortest first - a different question
+ * from the default board, which ranks by score. A loss never appears on the fastest board.
+ */
+export async function fetchTopScores(
+  limit = 10,
+  mode?: ScoreMode,
+  sort?: 'score' | 'fastest'
+): Promise<TopScore[]> {
   try {
-    const query = `limit=${limit}${mode ? `&mode=${mode}` : ''}`;
+    const query = `limit=${limit}${mode ? `&mode=${mode}` : ''}${sort === 'fastest' ? '&sort=fastest' : ''}`;
     const res = await fetch(`/api/scores/top?${query}`);
     if (!res.ok) return [];
     return (await res.json()) as TopScore[];

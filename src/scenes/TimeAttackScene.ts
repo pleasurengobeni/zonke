@@ -368,12 +368,12 @@ export class TimeAttackScene extends Phaser.Scene {
     // The session already knows who is playing (asked once, before the first game), so a
     // finished round goes straight onto the board instead of interrupting with a prompt.
     const name = await ensurePlayerName();
-    const saved = await submitScore(
+    const saved = await submitScore({
       name,
-      this.score,
-      Math.round(this.time.now - this.roundStartAt),
-      'timeattack'
-    );
+      score: this.score,
+      durationMs: Math.round(this.time.now - this.roundStartAt),
+      mode: 'timeattack',
+    });
 
     const top = await fetchTopScores(10, 'timeattack');
     if (!loading.scene) return; // restarted while the requests were in flight

@@ -213,6 +213,44 @@ function fitLabel(text: Phaser.GameObjects.Text, maxWidth: number, shortLabel?: 
 
 
 
+/**
+ * When set, the scene stops drawing its own flat ball and figures and publishes their
+ * positions instead, for the 3D actor overlay to draw in their place. Nothing else about
+ * the board changes - the grid, the header, the bullet dashes, the crosses and every
+ * layout number stay exactly as they are, because the overlay only replaces two things.
+ */
+let USE_3D_ACTORS = false;
+
+export function enable3DActors(): void {
+  USE_3D_ACTORS = true;
+}
+
+/** The board's live pixel geometry, for anything drawing on top of it. */
+export interface ActorLayout {
+  canvasW: number;
+  canvasH: number;
+  gridLeft: number;
+  cellW: number;
+  logTop: number;
+  rowH: number;
+  figureX: [number, number];
+  figureScale: number;
+  ballR: number;
+}
+
+export interface ActorBall {
+  x: number;
+  y: number;
+  r: number;
+  split: boolean;
+}
+
+export interface ActorFigure {
+  slot: number;
+  side: 0 | 1;
+  parts: number;
+}
+
 export class ZonkeScene extends Phaser.Scene {
   private players!: [PlayerState, PlayerState];
   private activeIndex = 0;
@@ -418,6 +456,8 @@ export class ZonkeScene extends Phaser.Scene {
     // just means a fractionally longer flight, not a different landing.
     this.ballRestY = TABLE_BOTTOM + 42 * S;
     this.ball = this.add.circle(0, 0, BALL_R, 0xffd54f);
+    // The overlay draws a real sphere in its place, at this exact position.
+    this.ball.setVisible(!USE_3D_ACTORS);
     this.positionBallAtRest();
 
     const turnY = this.ballRestY + 28 * S;
@@ -491,6 +531,45 @@ export class ZonkeScene extends Phaser.Scene {
         this.showModePicker();
       });
     }
+  }
+
+  /** The pixel geometry the board is currently laid out on. */
+  actorLayout(): ActorLayout {
+    return {
+      canvasW: CANVAS_W,
+      canvasH: CANVAS_H,
+      gridLeft: GRID_LEFT,
+      cellW: CELL_W,
+      logTop: LOG_TOP,
+      rowH: ROW_H,
+      figureX: [FIGURE_X[0], FIGURE_X[1]],
+      figureScale: FIGURE_SCALE,
+      ballR: BALL_R,
+    };
+  }
+
+  /** Every ball on the board: the ones in flight, or the one parked on the launcher. */
+  actorBalls(): ActorBall[] {
+    if (this.balls.length > 0) {
+      return this.balls.map((b) => ({
+        x: b.x,
+        y: b.y,
+        r: b.fromSplit ? BALL_R * 0.78 : BALL_R,
+        split: b.fromSplit,
+      }));
+    }
+    return [{ x: this.ballX, y: this.ballY, r: BALL_R, split: false }];
+  }
+
+  /** How many parts each row's figure has earned, per side. */
+  actorFigures(): ActorFigure[] {
+    const out: ActorFigure[] = [];
+    this.rowFigureParts.forEach((row, slot) =>
+      row.forEach((parts, side) => {
+        if (parts > 0) out.push({ slot, side: side as 0 | 1, parts });
+      })
+    );
+    return out;
   }
 
   /** Relabels the human player once the session's name comes back from the prompt. */
@@ -656,15 +735,15 @@ export class ZonkeScene extends Phaser.Scene {
     g.strokeRect(GRID_LEFT, HEADER_TOP, tableWidth, TABLE_BOTTOM - HEADER_TOP);
     g.lineBetween(GRID_LEFT, LOG_TOP, GRID_LEFT + tableWidth, LOG_TOP);
 
-    // Row dividers for each round row (thicker) + sub-line divider (thinner, dashed feel via alpha).
+    // One divider per row and nothing inside it. The half-height sub-line that used to
+    // split each row in two is gone: the two players' bullet dashes already sit in their
+    // own halves, so the line only added clutter to every single row.
     for (let r = 0; r < MAX_VISIBLE_ROWS; r++) {
       const y = LOG_TOP + r * ROW_H;
       if (r > 0) {
         g.lineStyle(2, 0xffffff, 1);
         g.lineBetween(GRID_LEFT, y, GRID_LEFT + tableWidth, y);
       }
-      g.lineStyle(1, 0xffffff, 0.35);
-      g.lineBetween(GRID_LEFT, y + SUB_H, GRID_LEFT + tableWidth, y + SUB_H);
 
       // Row position label: bottom row = 1, counting upward to MAX_VISIBLE_ROWS at the top.
       const rowNumber = MAX_VISIBLE_ROWS - r;
@@ -741,7 +820,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.landings = [];
     this.splitUsedThisTurn = false;
     this.positionBallAtRest();
-    this.ball.setVisible(true);
+    this.ball.setVisible(!USE_3D_ACTORS);
     this.columnHighlight.setVisible(false);
     if (this.isCpuTurn() && !this.gameOver && this.mode) {
       this.time.delayedCall(500, () => this.takeCpuTurn());
@@ -983,6 +1062,7 @@ export class ZonkeScene extends Phaser.Scene {
       const distance = APEX_SPAN * Phaser.Math.FloatBetween(0.15, 1);
       const speed = Math.sqrt(2 * FRICTION * distance);
       const gfx = this.add.circle(origin.x, origin.y, BALL_R * 0.78, SPLIT_COLOR_HEX);
+      gfx.setVisible(!USE_3D_ACTORS);
       this.balls.push({
         gfx,
         x: origin.x,
@@ -1456,14 +1536,15 @@ export class ZonkeScene extends Phaser.Scene {
       if (saving || saved) return;
       saving = true;
       setButtonLabel(save, 'Saving...');
-      const ok = await submitScore(
-        human.name,
-        human.kills,
+      const ok = await submitScore({
+        name: human.name,
+        score: human.kills,
         // The API's floor is one second; a match can't realistically be shorter, but a
         // rejected submission over a rounding edge would be a silly way to lose a run.
-        Math.max(1000, durationMs),
-        'zonke'
-      );
+        durationMs: Math.max(1000, durationMs),
+        mode: 'zonke',
+        won: playerWon,
+      });
       saving = false;
       // A restart while the request was in flight destroys these objects - Phaser clears
       // .scene on destroy, which is the cheapest way to ask "is this still on screen?".
@@ -1476,12 +1557,17 @@ export class ZonkeScene extends Phaser.Scene {
       setButtonLabel(save, 'Score saved');
       track('score_saved', { mode: this.mode?.name, kills: human.kills, durationMs });
       board.setText('Loading leaderboard...');
-      const top = await fetchTopScores(5, 'zonke');
+      // The fastest WINS, not the highest scores - beating the CPU quickly is the thing
+      // worth racing, and a long grind to four kills says less than a short one.
+      const top = await fetchTopScores(10, 'zonke', 'fastest');
       if (!board.scene) return;
       board.setText(
         top.length
-          ? ['Top runs', ...top.map((r, i) => `${i + 1}. ${r.name}  -  ${r.score} kills  (${formatClock(r.durationMs)})`)].join('\n')
-          : 'No saved runs yet.'
+          ? [
+              'Fastest wins',
+              ...top.map((r, i) => `${i + 1}. ${r.name}  -  ${formatClock(r.durationMs)}  (${r.score} kills)`),
+            ].join('\n')
+          : 'No wins saved yet - be the first!'
       );
     };
 
@@ -1624,6 +1710,7 @@ export class ZonkeScene extends Phaser.Scene {
 
     // One figure per row, in the margin level with that row, on that player's side. Each
     // row's figure is built only by the balls that landed in it.
+    if (USE_3D_ACTORS) return; // the overlay draws the figures; the rest of the board is unchanged
     this.rowFigureParts.forEach((row, slot) =>
       row.forEach((count, sub) => {
         if (count === 0) return;

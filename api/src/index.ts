@@ -66,9 +66,10 @@ app.post('/scores', rateLimit, (req, res) => {
     res.status(400).json({ error: 'Invalid score submission' });
     return;
   }
+  const won = req.body?.won === true || req.body?.won === 1 ? 1 : 0;
   const info = db
-    .prepare('INSERT INTO scores (name, score, duration_ms, mode) VALUES (?, ?, ?, ?)')
-    .run(name, score, durationMs, mode);
+    .prepare('INSERT INTO scores (name, score, duration_ms, mode, won) VALUES (?, ?, ?, ?, ?)')
+    .run(name, score, durationMs, mode, won);
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
@@ -81,14 +82,27 @@ app.get('/scores/top', (req, res) => {
     res.status(400).json({ error: 'Unknown mode' });
     return;
   }
-  const where = mode ? 'WHERE mode = ?' : '';
-  const params = mode ? [mode, limit] : [limit];
+  // Two boards off one table: the default ranks by score, and `sort=fastest` answers the
+  // other question people actually ask - who beat the CPU quickest. A fastest board only
+  // ever counts won runs, so a quick loss can never top it.
+  const fastest = req.query.sort === 'fastest';
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (mode) {
+    clauses.push('mode = ?');
+    params.push(mode);
+  }
+  if (fastest) clauses.push('won = 1');
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const order = fastest
+    ? 'duration_ms ASC, score DESC, created_at ASC'
+    : 'score DESC, duration_ms ASC, created_at ASC';
   const rows = db
     .prepare(
-      `SELECT name, score, duration_ms as durationMs, mode, created_at as createdAt FROM scores
-       ${where} ORDER BY score DESC, duration_ms ASC, created_at ASC LIMIT ?`
+      `SELECT name, score, duration_ms as durationMs, mode, won, created_at as createdAt FROM scores
+       ${where} ORDER BY ${order} LIMIT ?`
     )
-    .all(...params);
+    .all(...params, limit);
   res.json(rows);
 });
 
@@ -155,7 +169,8 @@ app.get('/stats', (_req, res) => {
     .get();
   const zonkeScoreStats = db
     .prepare(
-      `SELECT COUNT(*) as n, AVG(score) as avgKills, MAX(score) as maxKills, AVG(duration_ms) as avgDurationMs
+      `SELECT COUNT(*) as n, AVG(score) as avgKills, MAX(score) as maxKills, AVG(duration_ms) as avgDurationMs,
+              SUM(won) as wins, MIN(CASE WHEN won = 1 THEN duration_ms END) as fastestWinMs
        FROM scores WHERE mode = 'zonke'`
     )
     .get();
