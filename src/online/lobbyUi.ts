@@ -5,7 +5,7 @@
 // is always on screen, because "am I waiting, or am I challenging someone?" is the only
 // question this screen has to answer.
 import { swallowPointerEvents } from '../domOverlay';
-import type { LobbyPlayer, PlayerRep } from './net';
+import type { LobbyPlayer, OnlineDifficulty, PlayerRep } from './net';
 
 const STYLE = `
 .lobby { position: fixed; inset: 0; z-index: 12; display: flex; align-items: center; justify-content: center;
@@ -18,6 +18,8 @@ const STYLE = `
 .lobby .you b { color: #4caf50; }
 .lobby .you .change { color: #ffd54f; text-decoration: underline; cursor: pointer; margin-left: 6px; }
 .lobby .status-line { font-size: 13px; color: #ffd54f; margin: 10px 0; min-height: 18px; }
+.lobby .levels { margin: 8px 0 12px; }
+.lobby .levels span { font-size: 12px; color: #ffb74d; line-height: 1.5; }
 .lobby ul { list-style: none; margin: 0; padding: 0; }
 .lobby li { display: flex; align-items: center; justify-content: space-between; gap: 10px;
   padding: 10px 12px; border: 1px solid #2f353c; border-radius: 9px; margin-bottom: 8px; background: #22272d; }
@@ -129,6 +131,9 @@ export class LobbyUi {
   private readonly youLine = document.createElement('div');
   private prompt: HTMLElement | null = null;
   private visible = false;
+  private levels!: HTMLElement;
+  /** Every challenge is played at Hard - see the server for why. */
+  readonly difficulty: OnlineDifficulty = 'Hard';
 
   constructor(private readonly callbacks: LobbyCallbacks) {
     const style = document.createElement('style');
@@ -145,6 +150,14 @@ export class LobbyUi {
     this.youLine.className = 'you';
     this.statusLine.className = 'status-line';
 
+    // Challenges are played at Hard - not a choice, but worth saying out loud.
+    const levels = document.createElement('div');
+    levels.className = 'levels';
+    const levelLabel = document.createElement('span');
+    levelLabel.textContent = 'Challenges are played at HARD - same board, same rows, no easy ZONKE.';
+    levels.appendChild(levelLabel);
+    this.levels = levels;
+
     const foot = document.createElement('div');
     foot.className = 'foot';
     const leave = document.createElement('button');
@@ -153,7 +166,7 @@ export class LobbyUi {
     leave.addEventListener('click', () => this.callbacks.onLeave());
     foot.appendChild(leave);
 
-    card.append(title, this.youLine, this.statusLine, this.list, foot);
+    card.append(title, this.youLine, this.statusLine, this.levels, this.list, foot);
     this.root.appendChild(card);
   }
 
@@ -218,6 +231,7 @@ export class LobbyUi {
         button.textContent = 'Challenge';
         button.disabled = player.status !== 'waiting' || you.status !== 'waiting';
         button.addEventListener('click', () => this.callbacks.onChallenge(player.id));
+        button.title = `Challenge ${player.name} at ${this.difficulty}`;
       }
 
       // Their record, on the far right - so you can see who you are taking on.
@@ -262,7 +276,7 @@ export class LobbyUi {
   }
 
   /** The other half of a challenge: someone has picked you. */
-  showChallenge(from: { name: string }): void {
+  showChallenge(from: { name: string }, difficulty: OnlineDifficulty = 'Moderate'): void {
     this.closePrompt();
     const prompt = document.createElement('div');
     prompt.className = 'lobby-prompt';
@@ -272,7 +286,7 @@ export class LobbyUi {
     const h2 = document.createElement('h2');
     h2.textContent = `${from.name} challenges you`;
     const p = document.createElement('p');
-    p.textContent = 'First to a lead the remaining rows cannot close wins. They shoot first.';
+    p.textContent = `At ${difficulty}. First to a lead the remaining rows cannot close wins - they shoot first.`;
     const row = document.createElement('div');
     row.className = 'row';
     const accept = document.createElement('button');

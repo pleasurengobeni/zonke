@@ -41,16 +41,19 @@ export async function fetchRep(name: string): Promise<PlayerRep | null> {
   }
 }
 
+export type OnlineDifficulty = 'Easy' | 'Moderate' | 'Hard';
+
 export interface MatchStart {
   matchId: string;
   seed: number;
   youIndex: 0 | 1;
+  difficulty: OnlineDifficulty;
   opponent: { id: string; name: string };
 }
 
 export interface NetListener {
   onLobby?(you: LobbyPlayer, players: LobbyPlayer[]): void;
-  onChallenged?(from: { id: string; name: string }): void;
+  onChallenged?(from: { id: string; name: string }, difficulty: OnlineDifficulty): void;
   onDeclined?(by: { name: string }): void;
   onCancelled?(by: { name: string }): void;
   onMatch?(match: MatchStart): void;
@@ -93,7 +96,10 @@ export class Net {
           this.listener.onLobby?.(message.you as LobbyPlayer, message.players as LobbyPlayer[]);
           break;
         case 'challenged':
-          this.listener.onChallenged?.(message.from as { id: string; name: string });
+          this.listener.onChallenged?.(
+            message.from as { id: string; name: string },
+            (message.difficulty as OnlineDifficulty) ?? 'Moderate'
+          );
           break;
         case 'declined':
           this.listener.onDeclined?.(message.by as { name: string });
@@ -123,8 +129,8 @@ export class Net {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
   }
 
-  challenge(id: string): void {
-    this.send({ t: 'challenge', to: id });
+  challenge(id: string, difficulty: OnlineDifficulty): void {
+    this.send({ t: 'challenge', to: id, difficulty });
   }
 
   accept(): void {

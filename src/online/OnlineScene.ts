@@ -48,6 +48,7 @@ export class OnlineScene extends Phaser.Scene {
   private clockText!: Phaser.GameObjects.Text;
   private turnText!: Phaser.GameObjects.Text;
   private messageText!: Phaser.GameObjects.Text;
+  private penaltyText!: Phaser.GameObjects.Text;
   private nameTexts: [Phaser.GameObjects.Text, Phaser.GameObjects.Text] = [null as never, null as never];
   private endPanel: Phaser.GameObjects.GameObject[] = [];
 
@@ -70,7 +71,9 @@ export class OnlineScene extends Phaser.Scene {
     // Index 0 is the challenger on BOTH screens, so the engines agree on who is who.
     const names: [string, string] = this.opts.match.youIndex === 0 ? [you, them] : [them, you];
 
-    this.engine = new Match(MODES[1], names[0], {
+    // The difficulty both players agreed to when the challenge was accepted.
+    const mode = MODES.find((m) => m.name === this.opts.match.difficulty) ?? MODES[1];
+    this.engine = new Match(mode, names[0], {
       onMessage: (text) => this.messageText.setText(text),
       onTurn: () => this.refreshTurn(),
       onBoardChanged: () => this.refreshNames(),
@@ -106,6 +109,11 @@ export class OnlineScene extends Phaser.Scene {
         wordWrap: { width: this.scale.width * 0.92 },
       })
       .setOrigin(0.5, 0);
+
+    this.penaltyText = this.add
+      .text(0, 0, '', { fontSize: this.fs(24), color: '#ff1744', fontStyle: 'bold' })
+      .setOrigin(0.5)
+      .setVisible(false);
 
     this.input.on('pointerdown', () => this.startCharge());
     this.input.on('pointerup', () => this.release());
@@ -272,6 +280,16 @@ export class OnlineScene extends Phaser.Scene {
     wash(this.engine.bonusRow, 0xffd54f, pulse);
     wash(this.engine.lifelineRow, 0xff9800, pulse);
     wash(this.engine.splitRow, 0x00e676, pulse + 0.1);
+    // Faster pulse on the red row - it is a warning rather than a prize.
+    const redPulse = 0.14 + 0.16 * Math.sin(this.time.now / 180);
+    wash(this.engine.penaltyRow, 0xff1744, redPulse);
+    if (this.engine.penaltyRow !== null) {
+      this.penaltyText.setText(`-${this.engine.penaltyMoves}`);
+      this.penaltyText.setPosition(this.centreX(), this.py(this.engine.penaltyRow) + this.rowH / 2);
+      this.penaltyText.setVisible(true);
+    } else {
+      this.penaltyText.setVisible(false);
+    }
 
     // Bullet dashes, laid from each player's own side.
     this.engine.rowBullets.forEach((row, slot) =>
@@ -362,11 +380,81 @@ export class OnlineScene extends Phaser.Scene {
     );
   }
 
+  /** Paper falling over the win screen. */
+  private launchConfetti(depth: number, celebratory: boolean): void {
+    const colours = celebratory
+      ? [0xffd54f, 0x4caf50, 0x2196f3, 0xff5252, 0xffffff, 0x00e676]
+      : [0x666666, 0x888888, 0xaaaaaa];
+    for (let i = 0; i < 40; i++) {
+      const x = Phaser.Math.Between(0, this.scale.width);
+      const size = Phaser.Math.Between(6, 13) * this.s;
+      const piece = this.add
+        .rectangle(x, -20 * this.s, size, size * Phaser.Math.FloatBetween(0.35, 0.7), Phaser.Utils.Array.GetRandom(colours))
+        .setDepth(depth)
+        .setAngle(Phaser.Math.Between(0, 360));
+      this.tweens.add({
+        targets: piece,
+        y: this.scale.height + 40 * this.s,
+        x: x + Phaser.Math.Between(-90, 90) * this.s,
+        angle: piece.angle + Phaser.Math.Between(180, 720),
+        duration: Phaser.Math.Between(2400, 4600),
+        delay: Phaser.Math.Between(0, 2600),
+        repeat: -1,
+      });
+    }
+  }
+
+  /** The winner's figures marching across the screen, legs swinging, pistol raised. */
+  private marchVictors(depth: number, side: 0 | 1): void {
+    const gfx = this.add.graphics().setDepth(depth);
+    const v = Math.max(this.figureScale * 1.5, 1.6);
+    const y = this.scale.height * 0.8;
+    const count = 5;
+    const spacing = Math.max(this.scale.width / (count + 1), 64 * this.s);
+    const speed = this.scale.width / 5200;
+    const start = -spacing;
+    const marchers = Array.from({ length: count }, (_m, i) => ({ x: start - i * spacing, phase: i * 0.7 }));
+
+    const event = this.time.addEvent({
+      delay: 16,
+      loop: true,
+      callback: () => {
+        gfx.clear();
+        const t = this.time.now;
+        const colour = side === 0 ? P1_HEX : P2_HEX;
+        marchers.forEach((marcher) => {
+          marcher.x += speed * 16;
+          if (marcher.x > this.scale.width + spacing) marcher.x = start;
+          const swing = Math.sin(t / 110 + marcher.phase);
+          const bob = Math.abs(Math.cos(t / 110 + marcher.phase)) * 3 * v;
+          const x = marcher.x;
+          const top = y - bob;
+          gfx.lineStyle(Math.max(2, 2.6 * v), colour, 1);
+          gfx.fillStyle(colour, 1);
+          gfx.fillRoundedRect(x - 2.6 * v, top - 7 * v, 5.2 * v, 15 * v, 1.6 * v);
+          gfx.fillCircle(x, top - 13 * v, 5.2 * v);
+          gfx.lineBetween(x - 1.6 * v, top - 5 * v, x - 9 * v - swing * 3 * v, top + 4 * v);
+          gfx.lineBetween(x + 1.6 * v, top - 5 * v, x + 9 * v, top - 12 * v);
+          gfx.lineBetween(x - 1.6 * v, top + 8 * v, x - 8 * v + swing * 6 * v, top + 19 * v);
+          gfx.lineBetween(x + 1.6 * v, top + 8 * v, x + 8 * v - swing * 6 * v, top + 19 * v);
+          gfx.fillStyle(0xe4e4e4, 1);
+          gfx.fillRect(x + 9 * v - 1.5 * v, top - 23 * v, 3.2 * v, 11 * v);
+        });
+      },
+    });
+    this.events.once('shutdown', () => event.remove());
+  }
+
   private showEndPanel(title: string, subtitle: string, won = false): void {
     if (this.endPanel.length) return;
     const w = this.scale.width;
     const h = this.scale.height;
     const veil = this.add.rectangle(w / 2, h / 2, w, h, 0x000000, 0.86).setDepth(20).setInteractive();
+    // The same celebration the local game gets: paper falling, and the winner's figures
+    // marching across the screen. A match against a person should not end more quietly
+    // than one against the CPU.
+    this.launchConfetti(21, won);
+    this.marchVictors(24, won ? this.opts.match.youIndex : ((1 - this.opts.match.youIndex) as 0 | 1));
     const heading = this.add
       .text(w / 2, h * 0.34, title, {
         fontSize: this.fs(64),

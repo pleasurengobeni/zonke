@@ -16,6 +16,13 @@ import { db } from './db.js';
 
 type Status = 'waiting' | 'challenging' | 'challenged' | 'playing';
 
+// Challenge matches are played at Hard, always. On the easier bands ZONKE lands far too
+// often once somebody knows the timing, which makes a match against another person a
+// coin-toss rather than a contest. It is stated in the challenge prompt so nobody is
+// surprised by it, but it is not a choice either player makes.
+type Difficulty = 'Hard';
+const MATCH_DIFFICULTY: Difficulty = 'Hard';
+
 interface Player {
   id: string;
   name: string;
@@ -23,6 +30,8 @@ interface Player {
   status: Status;
   /** Who this player has challenged, or been challenged by. */
   pending: string | null;
+  /** The difficulty the open challenge was issued at. */
+  pendingDifficulty: Difficulty;
   matchId: string | null;
   ip: string;
   alive: boolean;
@@ -33,6 +42,7 @@ interface GameMatch {
   seed: number;
   players: [string, string]; // index 0 shoots first
   turn: 0 | 1;
+  difficulty: Difficulty;
   startedAt: number;
   /** What each side says the result was, by index. Recorded once they agree. */
   reported: [Result | null, Result | null];
@@ -84,6 +94,7 @@ function cleanString(value: unknown, maxLen: number): string | null {
 function resetToWaiting(player: Player): void {
   player.status = 'waiting';
   player.pending = null;
+  player.pendingDifficulty = MATCH_DIFFICULTY;
   player.matchId = null;
 }
 
@@ -105,9 +116,11 @@ function handleChallenge(from: Player, targetId: string): void {
   }
   from.status = 'challenging';
   from.pending = target.id;
+  from.pendingDifficulty = MATCH_DIFFICULTY;
   target.status = 'challenged';
   target.pending = from.id;
-  send(target, { t: 'challenged', from: { id: from.id, name: from.name } });
+  target.pendingDifficulty = MATCH_DIFFICULTY;
+  send(target, { t: 'challenged', from: { id: from.id, name: from.name }, difficulty: MATCH_DIFFICULTY });
   broadcastLobby();
 }
 
@@ -125,6 +138,7 @@ function handleAccept(target: Player): void {
     seed: randomInt(1, 2 ** 31 - 1),
     players: [challenger.id, target.id],
     turn: 0,
+    difficulty: challenger.pendingDifficulty,
     startedAt: Date.now(),
     reported: [null, null],
     recorded: false,
@@ -143,6 +157,7 @@ function handleAccept(target: Player): void {
       // Both engines are built the same way round: index 0 is the challenger, on both
       // screens, so "player 0" means the same person to both of them.
       youIndex: index,
+      difficulty: match.difficulty,
       opponent: { id: opponent.id, name: opponent.name },
     });
   });
@@ -265,7 +280,17 @@ export function attachLobby(server: Server): WebSocketServer {
           socket.send(JSON.stringify({ t: 'error', message: 'A name is required.' }));
           return;
         }
-        player = { id, name, socket, status: 'waiting', pending: null, matchId: null, ip, alive: true };
+        player = {
+          id,
+          name,
+          socket,
+          status: 'waiting',
+          pending: null,
+          pendingDifficulty: MATCH_DIFFICULTY,
+          matchId: null,
+          ip,
+          alive: true,
+        };
         players.set(id, player);
         send(player, { t: 'welcome', you: { id, name } });
         broadcastLobby();

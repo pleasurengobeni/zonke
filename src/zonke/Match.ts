@@ -51,6 +51,16 @@ export const SPLIT_MAX_BALLS = 5;
 const SPLIT_SPAWN_CHANCE = 0.01;
 const SPLIT_WINDOW_MS = 15_000;
 
+// The red row, on the same terms as the local game: rolled for, at most twice a match,
+// the second only after four more kills, and worth 1-3 of the opponent's moves on that row.
+const PENALTY_SPAWN_CHANCE = 0.02;
+const PENALTY_MAX_PER_MATCH = 2;
+const PENALTY_KILLS_BETWEEN = 4;
+const PENALTY_MIN_MOVES = 1;
+const PENALTY_MAX_MOVES = 3;
+const PENALTY_MIN_TURNS = 3;
+const PENALTY_MAX_TURNS = 6;
+
 export interface EngineMode {
   name: string;
   zonkeBand: number; // rows of resting room above row 10 - thinner is harder
@@ -150,6 +160,9 @@ export class Match {
   lifelineMultiplier = 2;
   splitRow: number | null = null;
   splitSecondsLeft = 0;
+  /** The red row, and what it is worth - both read by the renderer. */
+  penaltyRow: number | null = null;
+  penaltyMoves = PENALTY_MIN_MOVES;
 
   elapsedMs = 0;
   private endedAtMs: number | null = null;
@@ -160,6 +173,10 @@ export class Match {
   private splitUsedThisTurn = false;
   private splitSeenThisGame = false;
   private splitExpiresAt = 0;
+  private penaltyTurnsLeft = 0;
+  private penaltyUsed = 0;
+  private penaltyJustClaimed = false;
+  private killsAtLastPenalty = 0;
   private bonusTurnsLeft = 0;
   private bonusJustHit = false;
   private nextBallId = 1;
@@ -345,6 +362,7 @@ export class Match {
       bonus: this.bonusRow,
       lifeline: this.lifelineRow,
       split: this.splitRow,
+      penalty: [this.penaltyRow, this.penaltyMoves, this.penaltyUsed],
       balls: this.balls.map((b) => [b.x.toFixed(6), b.y.toFixed(6), b.resting]),
     });
   }
@@ -501,6 +519,8 @@ export class Match {
     this.listener.onMessage?.(`${headline}${lastMessage}`);
     this.ensureLifeline();
     this.tickSplitRow(didSplit);
+    this.tickPenaltyRow(this.penaltyJustClaimed);
+    this.penaltyJustClaimed = false;
     this.listener.onBoardChanged?.();
 
     const win = checkWin(this.players[0], this.players[1]);
@@ -561,6 +581,7 @@ export class Match {
     let last: TurnOutcome | null = null;
     let bonusHit = false;
     let lifelineHit = 0;
+    let penaltyTaken = 0;
 
     live.forEach((row) => {
       let times = 1;
@@ -572,6 +593,12 @@ export class Match {
           times = this.lifelineMultiplier;
           lifelineHit = this.lifelineMultiplier;
         }
+      }
+      // The red row reaches across: your own move plays as normal, and the opponent loses
+      // what it is worth from what they have built on this row.
+      if (result !== 'ZONKE' && row === this.penaltyRow) {
+        penaltyTaken += this.applyPenalty(row, playerIndex);
+        this.penaltyJustClaimed = true;
       }
       for (let i = 0; i < times; i++) {
         if (opponent.deadRows[row] || active.deadRows[row]) break;
@@ -588,7 +615,14 @@ export class Match {
     if (bonusHit) this.pickBonusRow();
     this.bonusJustHit = bonusHit;
     if (lifelineHit > 0) this.lifelineRow = null;
-    const prefix = bonusHit ? '2x row! ' : lifelineHit > 0 ? `${lifelineHit}x LIFELINE! ` : '';
+    const penaltyNote =
+      penaltyTaken > 0
+        ? `-${penaltyTaken} to ${opponent.name}! `
+        : result !== 'ZONKE' && slot === this.penaltyRow
+          ? `Red row, but ${opponent.name} had nothing to lose there. `
+          : '';
+    const prefix =
+      penaltyNote + (bonusHit ? '2x row! ' : lifelineHit > 0 ? `${lifelineHit}x LIFELINE! ` : '');
 
     if (last) {
       const fired = last as TurnOutcome;
@@ -642,6 +676,66 @@ export class Match {
 
   private isTrailing(playerIndex: 0 | 1): boolean {
     return this.players[playerIndex].kills < this.players[1 - playerIndex].kills;
+  }
+
+  private get totalKills(): number {
+    return this.players[0].kills + this.players[1].kills;
+  }
+
+  /**
+   * Takes moves off the opponent on one row: their bullet steps first, because that is the
+   * progress that was nearly a kill, and only then the parts of their figure.
+   */
+  private applyPenalty(row: number, playerIndex: 0 | 1): number {
+    const victim = 1 - playerIndex;
+    const cost = this.penaltyMoves;
+    let remaining = cost;
+    while (remaining > 0 && this.rowBullets[row][victim] > 0) {
+      this.rowBullets[row][victim] -= 1;
+      remaining -= 1;
+    }
+    while (remaining > 0 && this.rowFigureParts[row][victim] > 0) {
+      this.rowFigureParts[row][victim] -= 1;
+      remaining -= 1;
+    }
+    return cost - remaining;
+  }
+
+  /** One turn of the red row's life - see the constants for the rules it follows. */
+  private tickPenaltyRow(claimed: boolean): void {
+    if (claimed) {
+      this.closePenaltyRow();
+      return;
+    }
+    if (this.penaltyRow !== null) {
+      this.penaltyTurnsLeft -= 1;
+      if (this.penaltyTurnsLeft <= 0) this.closePenaltyRow();
+      return;
+    }
+    if (this.penaltyUsed >= PENALTY_MAX_PER_MATCH) return;
+    if (this.penaltyUsed > 0 && this.totalKills < this.killsAtLastPenalty + PENALTY_KILLS_BETWEEN) return;
+    if (this.rng() >= PENALTY_SPAWN_CHANCE) return;
+
+    let next: number;
+    do {
+      next = this.between(0, BOARD_ROWS - 1);
+    } while (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow);
+    this.penaltyRow = next;
+    this.penaltyMoves = this.between(PENALTY_MIN_MOVES, PENALTY_MAX_MOVES);
+    this.penaltyTurnsLeft = this.between(PENALTY_MIN_TURNS, PENALTY_MAX_TURNS);
+    this.listener.onSpecialRowsChanged?.();
+    this.listener.onMessage?.(
+      `A RED ROW opened on row ${rowLabel(next)} - land on it to take ${this.penaltyMoves} move(s) off your opponent!`
+    );
+  }
+
+  private closePenaltyRow(): void {
+    if (this.penaltyRow === null) return;
+    this.penaltyRow = null;
+    this.penaltyTurnsLeft = 0;
+    this.penaltyUsed += 1;
+    this.killsAtLastPenalty = this.totalKills;
+    this.listener.onSpecialRowsChanged?.();
   }
 
   /**

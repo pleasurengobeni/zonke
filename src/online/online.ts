@@ -31,7 +31,7 @@ export class OnlineGame {
       },
       onRep: (name) => fetchRep(name),
       onChallenge: (id) => {
-        this.net.challenge(id);
+        this.net.challenge(id, this.ui.difficulty);
         this.ui.setStatus('Challenge sent - waiting for an answer.');
       },
       onAccept: () => this.net.accept(),
@@ -45,7 +45,7 @@ export class OnlineGame {
 
     this.net = new Net({
       onLobby: (you, players) => this.onLobby(you, players),
-      onChallenged: (from) => this.ui.showChallenge(from),
+      onChallenged: (from, difficulty) => this.ui.showChallenge(from, difficulty),
       onDeclined: (by) => this.ui.setStatus(`${by.name} declined.`),
       onCancelled: (by) => {
         this.ui.closePrompt();
