@@ -2,10 +2,10 @@
 // match comes out of it. Everything stateful lives in one of those three - this file only
 // routes events between them.
 import type Phaser from 'phaser';
-import { Net, type LobbyPlayer, type MatchStart } from './net';
+import { Net, fetchRep, type LobbyPlayer, type MatchStart } from './net';
 import { LobbyUi } from './lobbyUi';
 import { OnlineScene } from './OnlineScene';
-import { ensurePlayerName } from '../player';
+import { ensurePlayerName, changePlayerName } from '../player';
 import { track } from '../analytics';
 
 export class OnlineGame {
@@ -17,6 +17,19 @@ export class OnlineGame {
 
   constructor(private readonly game: Phaser.Game) {
     this.ui = new LobbyUi({
+      // The server knows players by the name they joined under, so a change means leaving
+      // the room and coming back in as the new one.
+      onChangeName: () => {
+        void changePlayerName().then((name) => {
+          if (name === this.name) return;
+          this.name = name;
+          this.ui.setStatus('Rejoining as ' + name + '...');
+          this.net.close();
+          this.connected = true;
+          this.net.connect(name);
+        });
+      },
+      onRep: (name) => fetchRep(name),
       onChallenge: (id) => {
         this.net.challenge(id);
         this.ui.setStatus('Challenge sent - waiting for an answer.');
@@ -91,6 +104,9 @@ export class OnlineGame {
       youName: this.name,
       onShoot: (power: number) => this.net.shoot(power),
       onLeave: () => this.leaveMatch(),
+      // Both players report the outcome; the server records it only if they agree, and
+      // that record is what the info button in the room shows.
+      onResult: (winnerIndex: 0 | 1, kills: [number, number]) => this.net.reportResult(winnerIndex, kills),
     });
     this.scene = this.game.scene.getScene('OnlineScene') as OnlineScene;
   }

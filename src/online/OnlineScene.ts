@@ -10,6 +10,7 @@
 import Phaser from 'phaser';
 import { BOARD_W, MODES, Match, seededRng, type Ball } from '../zonke/Match';
 import { BOARD_ROWS, FIGURE_PARTS, ROWS as LETTERS } from '../zonke/GameState';
+import { record } from '../analytics';
 import type { MatchStart } from './net';
 
 const DESIGN_W = 1500;
@@ -26,6 +27,7 @@ export interface OnlineSceneData {
   youName: string;
   onShoot(power: number): void;
   onLeave(): void;
+  onResult(winnerIndex: 0 | 1, kills: [number, number]): void;
 }
 
 export class OnlineScene extends Phaser.Scene {
@@ -72,7 +74,10 @@ export class OnlineScene extends Phaser.Scene {
       onMessage: (text) => this.messageText.setText(text),
       onTurn: () => this.refreshTurn(),
       onBoardChanged: () => this.refreshNames(),
-      onGameOver: (info) => this.showResult(info.winnerIndex, info.reason, info.kills, info.durationMs),
+      onGameOver: (info) => {
+        this.opts.onResult(info.winnerIndex, info.kills);
+        this.showResult(info.winnerIndex, info.reason, info.kills, info.durationMs);
+      },
     }, {
       rng: seededRng(this.opts.match.seed),
       opponentName: names[1],
@@ -134,13 +139,42 @@ export class OnlineScene extends Phaser.Scene {
     this.charging = false;
     const held = this.time.now - this.chargeStart;
     const power = this.engine.powerForHold(held);
+    // Only this player's own shots: the opponent's client records theirs, so recording
+    // both here would file every match twice.
+    record('shot', {
+      name: this.opts.youName,
+      by: 'player',
+      power: Number(power.toFixed(3)),
+      difficulty: 'Challenge',
+      elapsedMs: Math.round(this.engine.durationMs),
+    });
     this.opts.onShoot(power);
     this.messageText.setText('Shot away...');
   }
 
   /** A shot from either player, as relayed by the server. */
   applyShot(power: number): void {
+    const mine = this.myTurn;
+    const before = this.engine.players.map((p) => p.kills);
     this.engine.fireShot(power);
+    if (!mine) return;
+    // Where this player's own shot ended up, once the engine has settled it.
+    const check = this.time.addEvent({
+      delay: 250,
+      repeat: 40,
+      callback: () => {
+        if (!this.engine.canShoot && this.engine.phase !== 'over') return;
+        check.remove();
+        record('landing', {
+          name: this.opts.youName,
+          by: 'player',
+          difficulty: 'Challenge',
+          zonke: this.engine.balls.some((b) => b.y < 0),
+          kills: this.engine.players.map((p, i) => p.kills - before[i])[this.opts.match.youIndex],
+          score: this.engine.players.map((p) => p.kills),
+        });
+      },
+    });
   }
 
   opponentLeft(): void {

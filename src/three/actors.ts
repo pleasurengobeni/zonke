@@ -11,7 +11,7 @@
 // layout here to drift from, only the first one's coordinates.
 import * as THREE from 'three';
 import type Phaser from 'phaser';
-import type { ActorLayout, ZonkeScene } from '../scenes/ZonkeScene';
+import { set3DActors, type ActorLayout, type ZonkeScene } from '../scenes/ZonkeScene';
 
 const P1_COLOR = 0x4caf50;
 const P2_COLOR = 0x2196f3;
@@ -265,15 +265,31 @@ export class ActorOverlay {
  * Attaches the overlay to a running game. Polls for the board scene rather than assuming
  * it is up, since a restart (a resize, or Play again) tears the scene down and rebuilds it.
  */
-export function attach3DActors(game: Phaser.Game): ActorOverlay {
+export function attach3DActors(game: Phaser.Game): ActorOverlay | null {
   const host = (game.canvas.parentElement ?? document.body) as HTMLElement;
   if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
-  const overlay = new ActorOverlay(host);
 
+  // A device with no WebGL context available throws here. That is not a reason to break
+  // the game: the board keeps its own flat ball and figures and plays exactly as before.
+  let overlay: ActorOverlay;
+  try {
+    overlay = new ActorOverlay(host);
+  } catch (error) {
+    console.warn('3D actors unavailable, keeping the flat board', error);
+    set3DActors(false);
+    return null;
+  }
+
+  let handedOver = false;
   const frame = (): void => {
     const scene = game.scene.getScene('ZonkeScene') as ZonkeScene | null;
     if (scene && scene.scene.isActive() && typeof scene.actorLayout === 'function') {
       overlay.sync(scene);
+      // Only once a frame has actually been drawn does the board stop drawing its own.
+      if (!handedOver) {
+        handedOver = true;
+        set3DActors(true);
+      }
     }
     requestAnimationFrame(frame);
   };

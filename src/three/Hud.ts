@@ -4,6 +4,7 @@
 // read, and this game is half scoreboard - the clock, the kills and the turn message are
 // read constantly. DOM also gets crisp text, real buttons and a working keyboard for free.
 import { submitScore, fetchTopScores } from '../analytics';
+import { swallowPointerEvents } from '../domOverlay';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -117,6 +118,7 @@ export class Hud {
   private openPanel(build: (card: HTMLElement) => void): HTMLElement {
     this.closePanel();
     const panel = el('div', 'hud-panel');
+    swallowPointerEvents(panel);
     const card = el('div', 'hud-card');
     build(card);
     panel.appendChild(card);

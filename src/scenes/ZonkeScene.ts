@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
-import { track, submitScore, fetchTopScores } from '../analytics';
-import { ensurePlayerName, storedPlayerName, DEFAULT_NAME } from '../player';
+import { track, record, submitScore, fetchTopScores, fetchTopOnline } from '../analytics';
+import { ensurePlayerName, changePlayerName, storedPlayerName, DEFAULT_NAME } from '../player';
+import { fetchRep } from '../online/net';
 import {
   ROWS,
   BULLET_STEPS,
@@ -57,6 +58,12 @@ const P2_COLOR_HEX = 0x2196f3;
 const KILL_COLOR = '#ff5252';
 const NEUTRAL_COLOR = '#888888';
 const SPLIT_COLOR = '#00e676';
+
+// The leaderboard's categories. Difficulties are kept apart because an Easy win and a Hard
+// win are different achievements; Challenge is against other people, and Time Attack is
+// scored in points rather than time.
+const LEADERBOARD_CATEGORIES = ['Easy', 'Moderate', 'Hard', 'Challenge', 'Time Attack'] as const;
+type LeaderboardCategory = (typeof LEADERBOARD_CATEGORIES)[number];
 const SPLIT_COLOR_HEX = 0x00e676;
 
 // The split row's payout: landing on it bursts the ball into this many new ones, each with
@@ -218,11 +225,19 @@ function fitLabel(text: Phaser.GameObjects.Text, maxWidth: number, shortLabel?: 
  * positions instead, for the 3D actor overlay to draw in their place. Nothing else about
  * the board changes - the grid, the header, the bullet dashes, the crosses and every
  * layout number stay exactly as they are, because the overlay only replaces two things.
+ *
+ * It is switched on by the overlay itself, only once that overlay is actually rendering.
+ * That ordering matters: the flat ball and figures are the base the board always has, and
+ * a device without WebGL, or a chunk that fails to load, simply keeps them rather than
+ * ending up with a board that has no ball on it at all.
  */
 let USE_3D_ACTORS = false;
+const actorModeListeners = new Set<() => void>();
 
-export function enable3DActors(): void {
-  USE_3D_ACTORS = true;
+export function set3DActors(on: boolean): void {
+  if (USE_3D_ACTORS === on) return;
+  USE_3D_ACTORS = on;
+  actorModeListeners.forEach((listener) => listener());
 }
 
 /** The board's live pixel geometry, for anything drawing on top of it. */
@@ -289,6 +304,8 @@ export class ZonkeScene extends Phaser.Scene {
   // The match clock, shown above the board. It starts when a difficulty is picked (not at
   // page load, which would count the time spent reading the menu) and freezes on the win.
   private matchStartAt = 0;
+  /** How many turns this match has run - carried on every event, so shots can be ordered. */
+  private turnCount = 0;
   private matchEndedAt: number | null = null;
   private pickerShown = false;
 
@@ -300,6 +317,7 @@ export class ZonkeScene extends Phaser.Scene {
   private gameOver = false;
   private mode: Mode | null = null; // null while the difficulty is still being chosen
   private modeUi: Phaser.GameObjects.GameObject[] = [];
+  private leaderboardUi: Phaser.GameObjects.GameObject[] = [];
   private bulletGfx!: Phaser.GameObjects.Graphics;
   private laidOutW = 0;
   private laidOutH = 0;
@@ -354,6 +372,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.gameOver = false;
     this.matchEndedAt = null;
     this.pickerShown = false;
+    this.turnCount = 0;
     this.balls = [];
     this.landings = [];
     this.splitUsedThisTurn = false;
@@ -460,6 +479,15 @@ export class ZonkeScene extends Phaser.Scene {
     this.ball.setVisible(!USE_3D_ACTORS);
     this.positionBallAtRest();
 
+    // If the overlay starts (or fails) after this scene was built, follow the change.
+    const onActorMode = (): void => {
+      this.ball.setVisible(!USE_3D_ACTORS);
+      this.balls.forEach((b) => b.gfx.setVisible(!USE_3D_ACTORS || !b.fromSplit));
+      this.redrawAll();
+    };
+    actorModeListeners.add(onActorMode);
+    this.events.once('shutdown', () => actorModeListeners.delete(onActorMode));
+
     const turnY = this.ballRestY + 28 * S;
     this.turnText = this.add
       .text(CENTER_X, turnY, `${this.players[0].name}'s turn`, { fontSize: fs(24), color: P1_COLOR })
@@ -497,6 +525,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-THREE', () => this.chooseMode(2), this);
     this.input.keyboard!.on('keydown-FOUR', () => this.startTimeAttack(), this);
     this.input.keyboard!.on('keydown-FIVE', () => this.startOnline(), this);
+    this.input.keyboard!.on('keydown-SIX', () => this.showLeaderboard(), this);
 
     // Touch/mouse: press-and-hold anywhere on the board to charge, same as holding SPACE.
     // Tapping while the game is over restarts, so there is no keyboard-only control left.
@@ -576,6 +605,7 @@ export class ZonkeScene extends Phaser.Scene {
   /** Relabels the human player once the session's name comes back from the prompt. */
   private applyPlayerName(name: string): void {
     this.players[0].name = name;
+    if (!this.nameText?.scene) return; // the board has been torn down; the name still counts
     this.nameText.setFontSize(Math.max(1, Math.round(30 * S)));
     this.nameText.setText(name);
     fitLabel(this.nameText, MARGIN_L - 12 * S, 'P1');
@@ -620,6 +650,11 @@ export class ZonkeScene extends Phaser.Scene {
         color: '#00e676',
         onClick: () => this.startOnline(),
       },
+      {
+        label: '6   Leaderboard',
+        color: '#e0e0e0',
+        onClick: () => this.showLeaderboard(),
+      },
     ];
     const buttonPairs = pickerButtons.map(({ label: text, color, onClick }) => {
       const btn = this.add
@@ -644,6 +679,27 @@ export class ZonkeScene extends Phaser.Scene {
         wordWrap: { width: textW },
       })
       .setOrigin(0.5, 0);
+
+    // The name is remembered between visits, so this is the way back out of it.
+    const who = this.add
+      .text(CENTER_X, 0, `Playing as ${this.players[0].name}  -  tap to change`, {
+        fontSize: fs(17),
+        color: '#7fc98a',
+        align: 'center',
+        wordWrap: { width: textW },
+      })
+      .setOrigin(0.5, 0)
+      .setInteractive({ useHandCursor: true });
+    who.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+      event.stopPropagation();
+      void changePlayerName().then((name) => {
+        // The name is applied first and the label updated second: the menu may already be
+        // gone by the time the prompt is answered, and the player's own name mattering
+        // must not depend on whether the thing they clicked still exists.
+        this.applyPlayerName(name);
+        if (who.scene) who.setText(`Playing as ${name}  -  tap to change`);
+      });
+    });
 
     const rules = this.add
       .text(
@@ -671,7 +727,9 @@ export class ZonkeScene extends Phaser.Scene {
       });
       cy += curGap * 0.6;
       hint.setY(cy);
-      cy += hint.height + curGap * 0.5;
+      cy += hint.height + curGap * 0.4;
+      who.setY(cy);
+      cy += who.height + curGap * 0.5;
       rules.setY(cy);
       cy += rules.height;
       return cy;
@@ -680,7 +738,7 @@ export class ZonkeScene extends Phaser.Scene {
     let contentH = stack();
     if (contentH + 48 * S > availH) {
       const shrink = Phaser.Math.Clamp((availH - 48 * S) / contentH, 0.55, 1);
-      [title, hint, rules, ...buttonPairs.map((p) => p.label)].forEach((t) =>
+      [title, hint, who, rules, ...buttonPairs.map((p) => p.label)].forEach((t) =>
         t.setFontSize(Math.max(10, Math.round(parseInt(t.style.fontSize as string, 10) * shrink)))
       );
       btnHeight *= shrink;
@@ -701,14 +759,15 @@ export class ZonkeScene extends Phaser.Scene {
       label.setY(label.y + startY);
     });
     hint.setY(hint.y + startY);
+    who.setY(who.y + startY);
     rules.setY(rules.y + startY);
 
     const panel = this.add.rectangle(CENTER_X, midY, panelW, panelH, 0x000000, 0.88).setOrigin(0.5);
 
-    [title, hint, rules, ...buttonPairs.flatMap((p) => [p.btn, p.label])].forEach((o) =>
+    [title, hint, who, rules, ...buttonPairs.flatMap((p) => [p.btn, p.label])].forEach((o) =>
       o.setDepth(1)
     );
-    this.modeUi = [panel, title, hint, rules, ...buttonPairs.flatMap((p) => [p.btn, p.label])];
+    this.modeUi = [panel, title, hint, who, rules, ...buttonPairs.flatMap((p) => [p.btn, p.label])];
     this.turnText.setText('');
     this.messageText.setText('');
   }
@@ -726,6 +785,150 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   /** Hands over to the waiting room, which is loaded only if somebody asks for it. */
+  /**
+   * The leaderboard, one category at a time.
+   *
+   * Easy, Moderate and Hard are separate boards on purpose: beating the CPU on Easy and
+   * beating it on Hard are different achievements, and putting them in one list would rank
+   * the two as if they were the same. Challenge is the board for matches against other
+   * people, and Time Attack is its own thing entirely - points, not a time.
+   */
+  private showLeaderboard(category: LeaderboardCategory = 'Easy'): void {
+    if (this.mode) return;
+    this.modeUi.forEach((o) => o.destroy());
+    this.modeUi = [];
+    this.leaderboardUi.forEach((o) => o.destroy());
+    this.leaderboardUi = [];
+
+    const panelW = Math.min(720 * S, CANVAS_W * 0.94);
+    const midY = CANVAS_H / 2;
+    const panel = this.add.rectangle(CENTER_X, midY, panelW, CANVAS_H * 0.92, 0x000000, 0.92).setOrigin(0.5);
+    const top = midY - CANVAS_H * 0.44;
+    const title = this.add
+      .text(CENTER_X, top, 'LEADERBOARD', { fontSize: fs(28), color: '#ffd54f', fontStyle: 'bold' })
+      .setOrigin(0.5, 0)
+      .setDepth(1);
+
+    // One tab per category, sized to whatever room the screen has.
+    const tabs: Phaser.GameObjects.GameObject[] = [];
+    const tabW = Math.min((panelW - 24 * S) / LEADERBOARD_CATEGORIES.length, 140 * S);
+    const tabH = 34 * S;
+    const tabY = top + title.height + 12 * S;
+    LEADERBOARD_CATEGORIES.forEach((name, i) => {
+      const x = CENTER_X + (i - (LEADERBOARD_CATEGORIES.length - 1) / 2) * (tabW + 4 * S);
+      const active = name === category;
+      const box = this.add
+        .rectangle(x, tabY, tabW, tabH, active ? 0xffd54f : 0xffffff, active ? 0.85 : 0.06)
+        .setOrigin(0.5, 0)
+        .setStrokeStyle(1, 0xffd54f, active ? 1 : 0.35)
+        .setDepth(1)
+        .setInteractive({ useHandCursor: true });
+      const label = this.add
+        .text(x, tabY + tabH / 2, name, {
+          fontSize: fs(15),
+          color: active ? '#14161a' : '#dddddd',
+          fontStyle: active ? 'bold' : 'normal',
+        })
+        .setOrigin(0.5)
+        .setDepth(2);
+      fitLabel(label, tabW - 8 * S);
+      box.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+        event.stopPropagation();
+        if (name !== category) this.showLeaderboard(name);
+      });
+      tabs.push(box, label);
+    });
+
+    const list = this.add
+      .text(CENTER_X, tabY + tabH + 16 * S, 'Loading...', {
+        fontSize: fs(17),
+        color: '#ffffff',
+        align: 'center',
+        lineSpacing: 6 * S,
+        wordWrap: { width: panelW - 40 * S },
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(1);
+
+    const back = this.add
+      .rectangle(CENTER_X, midY + CANVAS_H * 0.39, Math.min(320 * S, panelW * 0.8), 44 * S, 0xffffff, 0.08)
+      .setOrigin(0.5)
+      .setStrokeStyle(1, 0xffd54f, 0.5)
+      .setDepth(1)
+      .setInteractive({ useHandCursor: true });
+    const backText = this.add
+      .text(CENTER_X, midY + CANVAS_H * 0.39, 'Back', { fontSize: fs(19), color: '#ffffff' })
+      .setOrigin(0.5)
+      .setDepth(2);
+    back.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+      event.stopPropagation();
+      this.leaderboardUi.forEach((o) => o.destroy());
+      this.leaderboardUi = [];
+      this.showModePicker();
+    });
+
+    // Your own ZONKE rate, under the board - the one number that says whether you are
+    // getting better, and you should not need another player to look you up to see it.
+    const mine = this.add
+      .text(CENTER_X, midY + CANVAS_H * 0.31, '', {
+        fontSize: fs(15),
+        color: '#7fc98a',
+        align: 'center',
+        wordWrap: { width: panelW - 40 * S },
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(1);
+
+    this.leaderboardUi = [panel, title, list, back, backText, mine, ...tabs];
+    track('leaderboard_viewed', { category });
+    void this.fillLeaderboard(list, category);
+    void this.fillOwnZonkeRate(mine);
+  }
+
+  /** "You land ZONKE 4.2% of the time" - read from every shot this player has taken. */
+  private async fillOwnZonkeRate(text: Phaser.GameObjects.Text): Promise<void> {
+    const rep = await fetchRep(this.players[0].name);
+    if (!text.scene) return;
+    if (!rep || rep.zonke.rate === null) {
+      text.setText('Your ZONKE rate: no shots recorded yet');
+      return;
+    }
+    const byDifficulty = rep.zonke.byDifficulty.filter((d) => d.shots >= 5);
+    const detail = byDifficulty.length
+      ? `  (${byDifficulty.map((d) => `${d.difficulty} ${(d.rate * 100).toFixed(0)}%`).join(', ')})`
+      : '';
+    text.setText(
+      `Your ZONKE rate: ${(rep.zonke.rate * 100).toFixed(1)}% - ${rep.zonke.hits} of ${rep.zonke.shots} shots${detail}`
+    );
+  }
+
+  /** Fetches whichever board the open tab is showing. */
+  private async fillLeaderboard(list: Phaser.GameObjects.Text, category: LeaderboardCategory): Promise<void> {
+    const render = (lines: string[], empty: string): void => {
+      if (!list.scene) return;
+      list.setText(lines.length ? lines.join('\n') : empty);
+    };
+
+    if (category === 'Challenge') {
+      const rows = await fetchTopOnline(10);
+      render(
+        rows.map((r, i) => `${i + 1}. ${r.name}  -  ${r.won}W ${r.lost}L`),
+        'No online matches finished yet.'
+      );
+      return;
+    }
+    if (category === 'Time Attack') {
+      const rows = await fetchTopScores(10, 'timeattack');
+      render(rows.map((r, i) => `${i + 1}. ${r.name}  -  ${r.score} points`), 'Nobody has saved a run yet.');
+      return;
+    }
+    const rows = await fetchTopScores(10, 'zonke', 'fastest', true, category);
+    render(
+      rows.map((r, i) => `${i + 1}. ${r.name}  -  ${formatClock(r.durationMs)}  (${r.score} kills)`),
+      `No ${category} wins saved yet - be the first!`
+    );
+  }
+
   private startOnline(): void {
     if (this.mode) return;
     track('mode_selected', { mode: 'Online' });
@@ -918,6 +1121,14 @@ export class ZonkeScene extends Phaser.Scene {
 
     this.columnHighlight.setVisible(true);
     this.columnHighlight.setFillStyle(this.activeIndex === 0 ? P1_COLOR_HEX : P2_COLOR_HEX, 0.15);
+    record('shot', {
+      name: this.players[0].name,
+      by: this.activeIndex === 0 ? 'player' : 'cpu',
+      power: Number(this.power.toFixed(3)),
+      difficulty: this.mode?.name,
+      turn: this.turnCount,
+      elapsedMs: Math.round(this.matchDurationMs()),
+    });
   }
 
   update(_time: number, delta: number): void {
@@ -1158,6 +1369,20 @@ export class ZonkeScene extends Phaser.Scene {
         : outcome.message;
     });
     this.bonusJustHit = bonusHit;
+    this.turnCount += 1;
+    record('landing', {
+      name: this.players[0].name,
+      by: activeIndexAtLaunch === 0 ? 'player' : 'cpu',
+      zonke: landings.some((l) => l.result === 'ZONKE'),
+      difficulty: this.mode?.name,
+      landings: landings.length,
+      rows: landings.map((l) => (l.result === 'ZONKE' ? 'ZONKE' : rowLabel(l.slot))),
+      split: didSplit,
+      kills,
+      bonus: bonusHit,
+      score: [this.players[0].kills, this.players[1].kills],
+      turn: this.turnCount,
+    });
 
     // One landing's message is the whole story. Several need a headline, or a kill from the
     // third ball of a split would be buried under whatever the fifth one happened to do.
@@ -1184,6 +1409,8 @@ export class ZonkeScene extends Phaser.Scene {
       this.turnText.setText('');
       track('game_over', {
         mode: this.mode?.name,
+        difficulty: this.mode?.name,
+        turns: this.turnCount,
         result: win.winner === this.players[0] ? 'p1_win' : 'cpu_win',
         p1Kills: this.players[0].kills,
         cpuKills: this.players[1].kills,
@@ -1557,6 +1784,8 @@ export class ZonkeScene extends Phaser.Scene {
         durationMs: Math.max(1000, durationMs),
         mode: 'zonke',
         won: playerWon,
+        // Which board this belongs on - an Easy win and a Hard win are not comparable.
+        difficulty: this.mode?.name,
       });
       saving = false;
       // A restart while the request was in flight destroys these objects - Phaser clears
@@ -1641,12 +1870,12 @@ export class ZonkeScene extends Phaser.Scene {
    */
   private async fillFastestBoard(board: Phaser.GameObjects.Text): Promise<void> {
     board.setText('Loading leaderboard...');
-    const top = await fetchTopScores(10, 'zonke', 'fastest');
+    const top = await fetchTopScores(10, 'zonke', 'fastest', true, this.mode?.name);
     if (!board.scene) return;
     board.setText(
       top.length
         ? [
-            'Fastest wins',
+            `Fastest wins - ${this.mode?.name ?? 'all'}`,
             ...top.map((r, i) => `${i + 1}. ${r.name}  -  ${formatClock(r.durationMs)}  (${r.score} kills)`),
           ].join('\n')
         : 'No wins saved yet - be the first!'

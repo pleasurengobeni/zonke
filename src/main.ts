@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { ZonkeScene, enable3DActors } from './scenes/ZonkeScene';
+import { ZonkeScene } from './scenes/ZonkeScene';
 import { TimeAttackScene } from './scenes/TimeAttackScene';
 import { track } from './analytics';
 
@@ -57,9 +57,13 @@ if (renderer3d === 'table') {
   void import('./three/main3d').then((m) => m.start3D());
 } else if (renderer3d !== null) {
   track('renderer_3d', { variant: 'actors' });
-  enable3DActors(); // must be set before the scene is created
   const game = bootPhaser();
-  void import('./three/actors').then((m) => m.attach3DActors(game));
+  // The board boots flat and playable; the overlay takes over the ball and the figures
+  // once it is actually drawing, and never if Three or WebGL cannot start.
+  void import('./three/actors')
+    .then((m) => m.attach3DActors(game))
+    .catch((error) => console.warn('3D actors failed to load, keeping the flat board', error));
+  if (params.has('online')) void import('./online/online').then((m) => m.startOnline(game));
 } else {
   const game = bootPhaser();
   // ?online=1 goes straight to the waiting room; the mode picker gets there too.

@@ -65,3 +65,42 @@ if (!scoreColumns2.some((c) => c.name === 'won')) {
 }
 
 db.exec('CREATE INDEX IF NOT EXISTS idx_scores_fastest ON scores(mode, won, duration_ms ASC)');
+
+// Which difficulty a score was set on. An Easy win and a Hard win are not comparable, so
+// they cannot share a board - every leaderboard is read one difficulty at a time. Rows
+// from before this column stay NULL: unknown, and deliberately absent from every
+// difficulty board rather than silently filed under one of them.
+const scoreColumns3 = db.prepare('PRAGMA table_info(scores)').all() as { name: string }[];
+if (!scoreColumns3.some((c) => c.name === 'difficulty')) {
+  db.exec('ALTER TABLE scores ADD COLUMN difficulty TEXT');
+}
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_scores_difficulty ON scores(mode, difficulty, won, duration_ms ASC)');
+
+// Shot and landing events carry the player's name in their payload, and the ZONKE rate is
+// read per player - an expression index keeps that from scanning the whole log every time
+// somebody opens an info panel.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_events_player
+    ON events(json_extract(payload, '$.name'), event_type);
+`);
+
+// Finished online matches, so a player has a record other players can look at before
+// deciding whether to challenge them. Names are not accounts - two people who pick the
+// same name share a record - but the waiting room is small and public, and a made-up
+// reputation is not worth a login screen.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS online_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    match_id TEXT NOT NULL UNIQUE,
+    winner_name TEXT NOT NULL,
+    loser_name TEXT NOT NULL,
+    winner_kills INTEGER NOT NULL,
+    loser_kills INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_online_winner ON online_results(winner_name COLLATE NOCASE);
+  CREATE INDEX IF NOT EXISTS idx_online_loser ON online_results(loser_name COLLATE NOCASE);
+`);

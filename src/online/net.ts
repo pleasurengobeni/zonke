@@ -10,6 +10,37 @@ export interface LobbyPlayer {
   status: 'waiting' | 'challenging' | 'challenged' | 'playing';
 }
 
+/** A player's record, as shown behind the info button in the waiting room. */
+export interface PlayerRep {
+  name: string;
+  online: { played: number; won: number; lost: number; lastWin: string | null };
+  cpu: {
+    wins: number;
+    fastestMs: number | null;
+    mostKills: number | null;
+    /** Per difficulty, because beating Hard is not the same as beating Easy. */
+    byDifficulty: { difficulty: string; wins: number; fastestMs: number }[];
+  };
+  timeAttack: { best: number | null };
+  /** How often they land the jackpot - the number that says whether someone is good. */
+  zonke: {
+    shots: number;
+    hits: number;
+    rate: number | null;
+    byDifficulty: { difficulty: string; shots: number; hits: number; rate: number }[];
+  };
+}
+
+export async function fetchRep(name: string): Promise<PlayerRep | null> {
+  try {
+    const res = await fetch(`/api/players/rep?name=${encodeURIComponent(name)}`);
+    if (!res.ok) return null;
+    return (await res.json()) as PlayerRep;
+  } catch {
+    return null;
+  }
+}
+
 export interface MatchStart {
   matchId: string;
   seed: number;
@@ -110,6 +141,11 @@ export class Net {
 
   shoot(power: number): void {
     this.send({ t: 'shot', power });
+  }
+
+  /** Both players report the outcome; the server records it only if they agree. */
+  reportResult(winnerIndex: 0 | 1, kills: [number, number]): void {
+    this.send({ t: 'result', winnerIndex, kills });
   }
 
   leaveMatch(): void {

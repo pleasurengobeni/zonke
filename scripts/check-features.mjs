@@ -35,8 +35,10 @@ for (const [label, w, h] of sizes) {
   await page.waitForTimeout(400);
   if (await page.$('#name-gate')) fail('name prompt did not close');
 
-  const stored = await page.evaluate(() => sessionStorage.getItem('zonke.playerName'));
-  if (stored !== 'Ntsako') fail(`name not stored in session (got ${stored})`);
+  // Kept in localStorage so a player coming back tomorrow is not asked again; whether
+  // that actually survives a return visit is check-name.mjs's job.
+  const stored = await page.evaluate(() => localStorage.getItem('zonke.playerName'));
+  if (stored !== 'Ntsako') fail(`name not persisted (got ${stored})`);
 
   await page.screenshot({ path: `${OUT}/${label}-2-picker.png` });
 

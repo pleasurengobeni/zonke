@@ -37,6 +37,17 @@ function boundedInt(v: unknown, min: number, max: number): number | null {
 const SCORE_MODES = ['timeattack', 'zonke'] as const;
 type ScoreMode = (typeof SCORE_MODES)[number];
 
+// The difficulty a run was played on. 'Challenge' - a match against another person - is
+// the fifth category a player sees, but it lives in online_results rather than here.
+const DIFFICULTIES = ['Easy', 'Moderate', 'Hard'] as const;
+type Difficulty = (typeof DIFFICULTIES)[number];
+
+/** null = not stated, undefined = stated but not a difficulty we know. */
+function difficultyOf(v: unknown): Difficulty | null | undefined {
+  if (v === undefined || v === null || v === '') return null;
+  return DIFFICULTIES.includes(v as Difficulty) ? (v as Difficulty) : undefined;
+}
+
 function scoreMode(v: unknown): ScoreMode | null {
   if (v === undefined || v === null) return 'timeattack'; // what the only pre-mode client sent
   return SCORE_MODES.includes(v as ScoreMode) ? (v as ScoreMode) : null;
@@ -69,9 +80,14 @@ app.post('/scores', rateLimit, (req, res) => {
     return;
   }
   const won = req.body?.won === true || req.body?.won === 1 ? 1 : 0;
+  const difficulty = difficultyOf(req.body?.difficulty);
+  if (difficulty === undefined) {
+    res.status(400).json({ error: 'Unknown difficulty' });
+    return;
+  }
   const info = db
-    .prepare('INSERT INTO scores (name, score, duration_ms, mode, won) VALUES (?, ?, ?, ?, ?)')
-    .run(name, score, durationMs, mode, won);
+    .prepare('INSERT INTO scores (name, score, duration_ms, mode, won, difficulty) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(name, score, durationMs, mode, won, difficulty);
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
@@ -95,20 +111,75 @@ app.get('/scores/top', (req, res) => {
     params.push(mode);
   }
   if (fastest) clauses.push('won = 1');
+  // One difficulty at a time: an Easy run and a Hard run do not belong on the same board.
+  const difficulty = difficultyOf(req.query.difficulty);
+  if (difficulty === undefined) {
+    res.status(400).json({ error: 'Unknown difficulty' });
+    return;
+  }
+  if (difficulty) {
+    clauses.push('difficulty = ?');
+    params.push(difficulty);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
   const order = fastest
     ? 'duration_ms ASC, score DESC, created_at ASC'
     : 'score DESC, duration_ms ASC, created_at ASC';
-  const rows = db
-    .prepare(
-      `SELECT name, score, duration_ms as durationMs, mode, won, created_at as createdAt FROM scores
-       ${where} ORDER BY ${order} LIMIT ?`
-    )
-    .all(...params, limit);
+
+  // `perPlayer` answers "who are the top ten PLAYERS", rather than "what are the ten best
+  // runs" - without it one person having a good week fills every row and the board stops
+  // telling anyone anything. Each player is represented by their own best run.
+  const perPlayer = req.query.perPlayer === '1' || req.query.perPlayer === 'true';
+  const sql = perPlayer
+    ? `SELECT name, score, durationMs, mode, won, difficulty, createdAt FROM (
+         SELECT name, score, duration_ms as durationMs, mode, won, difficulty, created_at as createdAt,
+                ROW_NUMBER() OVER (PARTITION BY name COLLATE NOCASE ORDER BY ${order}) AS rn
+         FROM scores ${where}
+       ) WHERE rn = 1 ORDER BY ${order.replace(/duration_ms/g, 'durationMs').replace(/created_at/g, 'createdAt')} LIMIT ?`
+    : `SELECT name, score, duration_ms as durationMs, mode, won, difficulty, created_at as createdAt FROM scores
+       ${where} ORDER BY ${order} LIMIT ?`;
+  const rows = db.prepare(sql).all(...params, limit);
   res.json(rows);
 });
 
 // ---- events (analytics) -------------------------------------------------------------
+
+/**
+ * Events arrive in batches, because the game has a lot to say: a match is roughly seventy
+ * shots, and one request each would both hammer the API and trip the per-IP limiter mid
+ * game. The client buffers and flushes, so a whole match costs a handful of requests.
+ */
+app.post('/events/batch', rateLimit, (req, res) => {
+  const sessionId = cleanString(req.body?.sessionId, 64);
+  const events = Array.isArray(req.body?.events) ? req.body.events : null;
+  if (!sessionId || !events || events.length === 0 || events.length > 200) {
+    res.status(400).json({ error: 'Invalid event batch' });
+    return;
+  }
+  const userAgent = cleanString(req.header('user-agent') ?? '', 300) ?? null;
+  const path_ = cleanString(req.body?.path, 200) ?? null;
+  const referrer = cleanString(req.body?.referrer, 300) ?? null;
+  const viewport = cleanString(req.body?.viewport, 20) ?? null;
+
+  const insert = db.prepare(
+    `INSERT INTO events (session_id, event_type, payload, path, referrer, user_agent, viewport)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  );
+  // One transaction for the batch: a hundred inserts otherwise means a hundred fsyncs.
+  const writeAll = db.transaction((rows: unknown[]) => {
+    let written = 0;
+    for (const row of rows) {
+      const event = row as Record<string, unknown>;
+      const type = cleanString(event.type, 64);
+      if (!type) continue;
+      const payload = event.payload === undefined ? null : JSON.stringify(event.payload).slice(0, 2000);
+      insert.run(sessionId, type, payload, path_, referrer, userAgent, viewport);
+      written += 1;
+    }
+    return written;
+  });
+  res.status(202).json({ written: writeAll(events) });
+});
 
 app.post('/events', rateLimit, (req, res) => {
   const sessionId = cleanString(req.body?.sessionId, 64);
@@ -418,6 +489,118 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 /** Who is in the waiting room right now - public, and tiny, so the lobby can show it. */
 app.get('/lobby/stats', (_req, res) => res.json(lobbyStats()));
+
+/**
+ * The Challenge board: who has won the most matches against other people. Ranked by wins,
+ * then fewest losses, so 5-0 sits above 5-9.
+ */
+app.get('/players/top-online', (req, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
+  const rows = db
+    .prepare(
+      `SELECT name, SUM(won) as won, SUM(lost) as lost FROM (
+         SELECT winner_name as name, 1 as won, 0 as lost FROM online_results
+         UNION ALL
+         SELECT loser_name as name, 0 as won, 1 as lost FROM online_results
+       ) GROUP BY name COLLATE NOCASE
+       HAVING won > 0
+       ORDER BY won DESC, lost ASC, name ASC LIMIT ?`
+    )
+    .all(limit);
+  res.json(rows);
+});
+
+/**
+ * One player's record, for the info button beside their name in the waiting room: how
+ * they have done against other people, and their best run against the CPU. Public on
+ * purpose - it is there to help someone decide whether to challenge them.
+ */
+app.get('/players/rep', (req, res) => {
+  const name = cleanString(req.query.name, 24);
+  if (!name) {
+    res.status(400).json({ error: 'A name is required' });
+    return;
+  }
+  const online = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN winner_name = ? COLLATE NOCASE THEN 1 ELSE 0 END) as won,
+         SUM(CASE WHEN loser_name  = ? COLLATE NOCASE THEN 1 ELSE 0 END) as lost,
+         MAX(CASE WHEN winner_name = ? COLLATE NOCASE THEN created_at END) as lastWin
+       FROM online_results
+       WHERE winner_name = ? COLLATE NOCASE OR loser_name = ? COLLATE NOCASE`
+    )
+    .get(name, name, name, name, name) as { won: number | null; lost: number | null; lastWin: string | null };
+
+  const cpu = db
+    .prepare(
+      `SELECT COUNT(*) as wins, MIN(duration_ms) as fastestMs, MAX(score) as mostKills
+       FROM scores WHERE mode = 'zonke' AND won = 1 AND name = ? COLLATE NOCASE`
+    )
+    .get(name) as { wins: number; fastestMs: number | null; mostKills: number | null };
+
+  // Per difficulty as well as overall - beating Hard is not the same as beating Easy.
+  const byDifficulty = db
+    .prepare(
+      `SELECT difficulty, COUNT(*) as wins, MIN(duration_ms) as fastestMs
+       FROM scores WHERE mode = 'zonke' AND won = 1 AND difficulty IS NOT NULL AND name = ? COLLATE NOCASE
+       GROUP BY difficulty ORDER BY difficulty`
+    )
+    .all(name);
+
+  const timeAttack = db
+    .prepare(`SELECT MAX(score) as best FROM scores WHERE mode = 'timeattack' AND name = ? COLLATE NOCASE`)
+    .get(name) as { best: number | null };
+
+  /**
+   * How often this player actually lands the jackpot. Counted from the shot and landing
+   * log rather than from saved scores, so it reflects every shot they have taken, not only
+   * the runs they chose to save - and split per difficulty, because the whole point of the
+   * difficulties is that the ZONKE band is a different size in each.
+   */
+  const zonke = db
+    .prepare(
+      `SELECT
+         json_extract(payload, '$.difficulty') as difficulty,
+         SUM(CASE WHEN event_type = 'shot' THEN 1 ELSE 0 END) as shots,
+         SUM(CASE WHEN event_type = 'landing' AND json_extract(payload, '$.zonke') = 1 THEN 1 ELSE 0 END) as hits
+       FROM events
+       WHERE event_type IN ('shot', 'landing')
+         AND json_extract(payload, '$.name') = ? COLLATE NOCASE
+         AND json_extract(payload, '$.by') = 'player'
+       GROUP BY difficulty`
+    )
+    .all(name) as { difficulty: string | null; shots: number; hits: number }[];
+
+  const totals = zonke.reduce(
+    (acc, row) => ({ shots: acc.shots + row.shots, hits: acc.hits + row.hits }),
+    { shots: 0, hits: 0 }
+  );
+
+  const won = online.won ?? 0;
+  const lost = online.lost ?? 0;
+  res.json({
+    name,
+    online: { played: won + lost, won, lost, lastWin: online.lastWin },
+    cpu: { wins: cpu.wins, fastestMs: cpu.fastestMs, mostKills: cpu.mostKills, byDifficulty },
+    timeAttack: { best: timeAttack.best },
+    zonke: {
+      shots: totals.shots,
+      hits: totals.hits,
+      // Null rather than zero when they have not shot yet: "no data" and "never hits it"
+      // are different things, and a 0% next to a new player's name would be a lie.
+      rate: totals.shots > 0 ? totals.hits / totals.shots : null,
+      byDifficulty: zonke
+        .filter((row) => row.difficulty && row.shots > 0)
+        .map((row) => ({
+          difficulty: row.difficulty as string,
+          shots: row.shots,
+          hits: row.hits,
+          rate: row.hits / row.shots,
+        })),
+    },
+  });
+});
 
 // One HTTP server for both the REST routes and the lobby's WebSocket upgrade, since nginx
 // proxies the whole of /api/ to this single port.

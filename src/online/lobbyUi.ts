@@ -4,7 +4,8 @@
 // listed to everyone else, and anyone who is free can be challenged. A player's own status
 // is always on screen, because "am I waiting, or am I challenging someone?" is the only
 // question this screen has to answer.
-import type { LobbyPlayer } from './net';
+import { swallowPointerEvents } from '../domOverlay';
+import type { LobbyPlayer, PlayerRep } from './net';
 
 const STYLE = `
 .lobby { position: fixed; inset: 0; z-index: 12; display: flex; align-items: center; justify-content: center;
@@ -15,6 +16,7 @@ const STYLE = `
 .lobby h1 { margin: 0 0 2px; font-size: 20px; color: #ffd54f; letter-spacing: 1px; }
 .lobby .you { font-size: 12px; color: #9aa1a9; margin-bottom: 14px; }
 .lobby .you b { color: #4caf50; }
+.lobby .you .change { color: #ffd54f; text-decoration: underline; cursor: pointer; margin-left: 6px; }
 .lobby .status-line { font-size: 13px; color: #ffd54f; margin: 10px 0; min-height: 18px; }
 .lobby ul { list-style: none; margin: 0; padding: 0; }
 .lobby li { display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -26,6 +28,13 @@ const STYLE = `
 .lobby button:disabled, .lobby-prompt button:disabled { background: #343a41; color: #7b8189; cursor: default; }
 .lobby button.ghost, .lobby-prompt button.ghost { background: #2c333a; color: #dfe3e8; }
 .lobby .empty { color: #8d949c; font-size: 13px; padding: 14px 2px; }
+.lobby .info { background: #2c333a; color: #cfd3d8; border: 1px solid #3a424b; border-radius: 50%;
+  width: 28px; height: 28px; min-width: 28px; padding: 0; font-size: 13px; font-weight: 700; line-height: 1; }
+.lobby .info:hover { background: #39424b; color: #fff; }
+.lobby .rep { margin-top: 8px; padding: 10px 12px; border: 1px solid #3a424b; border-radius: 8px;
+  background: #191d22; font-size: 12px; color: #cfd3d8; line-height: 1.7; }
+.lobby .rep b { color: #ffd54f; }
+.lobby .rep .none { color: #8d949c; }
 .lobby .foot { margin-top: 14px; display: flex; gap: 8px; }
 .lobby .foot button { flex: 1; }
 .lobby-prompt { position: fixed; inset: 0; z-index: 13; display: flex; align-items: center; justify-content: center;
@@ -39,11 +48,71 @@ const STYLE = `
 `;
 
 export interface LobbyCallbacks {
+  onChangeName(): void;
+  /** Looks up one player's record, for the info button beside their name. */
+  onRep(name: string): Promise<PlayerRep | null>;
   onChallenge(id: string): void;
   onAccept(): void;
   onDecline(): void;
   onCancel(): void;
   onLeave(): void;
+}
+
+function clock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/** A player's record as a few plain lines - what they have done, not a score. */
+function repLines(rep: PlayerRep): Node[] {
+  const line = (label: string, value: string, dim = false): HTMLElement => {
+    const div = document.createElement('div');
+    if (dim) div.className = 'none';
+    div.append(`${label} `);
+    const b = document.createElement('b');
+    b.textContent = value;
+    div.append(b);
+    return div;
+  };
+
+  const out: Node[] = [];
+  const { played, won, lost } = rep.online;
+  out.push(
+    played === 0
+      ? line('Online:', 'no matches yet', true)
+      : line('Online:', `${won}W ${lost}L of ${played}  (${Math.round((won / played) * 100)}% won)`)
+  );
+  if (rep.cpu.wins === 0) {
+    out.push(line('Vs CPU:', 'no saved wins', true));
+  } else {
+    // Broken out by difficulty: "three wins" means something different on Easy and Hard.
+    const byDifficulty = (rep.cpu.byDifficulty ?? []).filter((d) => d.wins > 0);
+    out.push(
+      byDifficulty.length
+        ? line('Vs CPU:', byDifficulty.map((d) => `${d.difficulty} ${d.wins}x (best ${clock(d.fastestMs)})`).join(', '))
+        : line('Vs CPU:', `${rep.cpu.wins} win${rep.cpu.wins === 1 ? '' : 's'}, fastest ${clock(rep.cpu.fastestMs ?? 0)}`)
+    );
+  }
+  out.push(
+    rep.timeAttack.best !== null
+      ? line('Time Attack:', `${rep.timeAttack.best} points`)
+      : line('Time Attack:', 'never played', true)
+  );
+
+  // How often they actually land the jackpot, over every shot they have ever taken.
+  const z = rep.zonke;
+  if (!z || z.rate === null) {
+    out.push(line('ZONKE rate:', 'no shots recorded yet', true));
+  } else {
+    out.push(line('ZONKE rate:', `${(z.rate * 100).toFixed(1)}% - ${z.hits} of ${z.shots} shots`));
+    const perDifficulty = (z.byDifficulty ?? []).filter((d) => d.shots >= 5);
+    if (perDifficulty.length) {
+      out.push(
+        line('  by mode:', perDifficulty.map((d) => `${d.difficulty} ${(d.rate * 100).toFixed(0)}%`).join(', '))
+      );
+    }
+  }
+  return out;
 }
 
 const STATUS_TEXT: Record<LobbyPlayer['status'], string> = {
@@ -67,6 +136,7 @@ export class LobbyUi {
     document.head.appendChild(style);
 
     this.root.className = 'lobby';
+    swallowPointerEvents(this.root);
     const card = document.createElement('div');
     card.className = 'lobby-card';
 
@@ -111,6 +181,14 @@ export class LobbyUi {
     const name = document.createElement('b');
     name.textContent = you.name;
     this.youLine.append(name, ` - ${STATUS_TEXT[you.status]}`);
+    // Only while free: changing a name means rejoining the room under the new one.
+    if (you.status === 'waiting') {
+      const change = document.createElement('span');
+      change.className = 'change';
+      change.textContent = 'change';
+      change.addEventListener('click', () => this.callbacks.onChangeName());
+      this.youLine.append(change);
+    }
 
     this.list.innerHTML = '';
     if (players.length === 0) {
@@ -142,9 +220,45 @@ export class LobbyUi {
         button.addEventListener('click', () => this.callbacks.onChallenge(player.id));
       }
 
-      row.append(who, button);
+      // Their record, on the far right - so you can see who you are taking on.
+      const info = document.createElement('button');
+      info.className = 'info';
+      info.textContent = 'i';
+      info.title = `${player.name}'s record`;
+      info.setAttribute('aria-label', `${player.name}'s record`);
+      info.addEventListener('click', () => this.toggleRep(row, player.name));
+
+      row.append(who, button, info);
       this.list.appendChild(row);
     });
+  }
+
+  /**
+   * Opens (or closes) one player's record under their row. Kept inline rather than in a
+   * dialog: you are comparing people, so being able to open two at once is the point.
+   */
+  private async toggleRep(row: HTMLElement, name: string): Promise<void> {
+    const existing = row.querySelector('.rep');
+    if (existing) {
+      existing.remove();
+      row.style.display = 'flex';
+      return;
+    }
+    const panel = document.createElement('div');
+    panel.className = 'rep';
+    panel.textContent = 'Looking up...';
+    // The row is a flex line; a record underneath it needs the row to wrap around both.
+    row.style.display = 'block';
+    row.appendChild(panel);
+
+    const rep = await this.callbacks.onRep(name);
+    if (!panel.isConnected) return;
+    panel.innerHTML = '';
+    if (!rep) {
+      panel.textContent = 'Could not load that record.';
+      return;
+    }
+    panel.append(...repLines(rep));
   }
 
   /** The other half of a challenge: someone has picked you. */
@@ -152,6 +266,7 @@ export class LobbyUi {
     this.closePrompt();
     const prompt = document.createElement('div');
     prompt.className = 'lobby-prompt';
+    swallowPointerEvents(prompt);
     const box = document.createElement('div');
     box.className = 'box';
     const h2 = document.createElement('h2');

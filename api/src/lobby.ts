@@ -12,6 +12,7 @@
 import type { IncomingMessage, Server } from 'node:http';
 import { randomInt } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
+import { db } from './db.js';
 
 type Status = 'waiting' | 'challenging' | 'challenged' | 'playing';
 
@@ -33,6 +34,14 @@ interface GameMatch {
   players: [string, string]; // index 0 shoots first
   turn: 0 | 1;
   startedAt: number;
+  /** What each side says the result was, by index. Recorded once they agree. */
+  reported: [Result | null, Result | null];
+  recorded: boolean;
+}
+
+interface Result {
+  winnerIndex: 0 | 1;
+  kills: [number, number];
 }
 
 const MAX_NAME = 24;
@@ -117,6 +126,8 @@ function handleAccept(target: Player): void {
     players: [challenger.id, target.id],
     turn: 0,
     startedAt: Date.now(),
+    reported: [null, null],
+    recorded: false,
   };
   matches.set(match.id, match);
 
@@ -180,6 +191,50 @@ function handleShot(player: Player, power: unknown): void {
   });
 }
 
+/**
+ * Records a finished match, once. The server does not simulate the game, so it cannot see
+ * who won - both clients report it, and the result is only written when the two of them
+ * agree. A pair who disagree (or a client making things up on its own) records nothing,
+ * which is the right way round: a missing result is better than a false one.
+ */
+function handleResult(player: Player, message: Record<string, unknown>): void {
+  const match = player.matchId ? matches.get(player.matchId) : null;
+  if (!match || match.recorded) return;
+  const index = match.players.indexOf(player.id) as 0 | 1;
+  if (index < 0) return;
+
+  const winnerIndex = message.winnerIndex === 0 || message.winnerIndex === 1 ? message.winnerIndex : null;
+  const kills = Array.isArray(message.kills) ? message.kills.map(Number) : null;
+  if (winnerIndex === null || !kills || kills.length !== 2 || kills.some((k) => !Number.isFinite(k))) return;
+
+  match.reported[index] = { winnerIndex, kills: [kills[0], kills[1]] };
+  const [a, b] = match.reported;
+  if (!a || !b) return;
+  if (a.winnerIndex !== b.winnerIndex) return; // they disagree - record nothing
+
+  const winner = players.get(match.players[a.winnerIndex]);
+  const loser = players.get(match.players[1 - a.winnerIndex]);
+  if (!winner || !loser) return;
+
+  match.recorded = true;
+  try {
+    db.prepare(
+      `INSERT OR IGNORE INTO online_results
+         (match_id, winner_name, loser_name, winner_kills, loser_kills, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      match.id,
+      winner.name,
+      loser.name,
+      a.kills[a.winnerIndex],
+      a.kills[1 - a.winnerIndex],
+      Date.now() - match.startedAt
+    );
+  } catch {
+    // A record that fails to save must not take the lobby down with it.
+  }
+}
+
 export function attachLobby(server: Server): WebSocketServer {
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE_BYTES });
 
@@ -232,6 +287,9 @@ export function attachLobby(server: Server): WebSocketServer {
           break;
         case 'shot':
           handleShot(player, message.power);
+          break;
+        case 'result':
+          handleResult(player, message);
           break;
         case 'leaveMatch': {
           const match = player.matchId ? matches.get(player.matchId) : null;

@@ -1,16 +1,30 @@
-// Who is playing, for this browser session.
+// Who is playing.
 //
-// sessionStorage, not localStorage: "ask once per session" is the actual requirement, so
-// the name survives a reload or a scene restart in this tab but a fresh visit asks again.
-// It is also per-tab, so two tabs can be two different players.
+// localStorage, so the name is still there next week: a returning player is greeted by
+// their own name instead of being asked again, and changing it is an explicit choice they
+// make from the menu or the waiting room. Nothing is sent anywhere - it is a name in this
+// browser, used for the turn indicator, the win screen and the leaderboard.
+//
+// sessionStorage was the first version of this and only lasted a tab session, so anyone
+// coming back the next day was asked all over again; readStored still looks there so that
+// a name given under the old behaviour carries over rather than being lost.
+import { swallowPointerEvents } from './domOverlay';
+
 const NAME_KEY = 'zonke.playerName';
 const MAX_NAME = 16;
 export const DEFAULT_NAME = 'Player 1';
 
 function readStored(): string | null {
   try {
-    const v = sessionStorage.getItem(NAME_KEY);
-    return v && v.trim() ? v.trim() : null;
+    const stored = localStorage.getItem(NAME_KEY);
+    if (stored && stored.trim()) return stored.trim();
+    // Carried over from when this lived in sessionStorage, then promoted so it lasts.
+    const legacy = sessionStorage.getItem(NAME_KEY);
+    if (legacy && legacy.trim()) {
+      writeStored(legacy.trim());
+      return legacy.trim();
+    }
+    return null;
   } catch {
     // Private-mode Safari throws on storage access - the game still has to start.
     return null;
@@ -19,7 +33,7 @@ function readStored(): string | null {
 
 function writeStored(name: string): void {
   try {
-    sessionStorage.setItem(NAME_KEY, name);
+    localStorage.setItem(NAME_KEY, name);
   } catch {
     // Not being able to remember the name is not a reason to fail the game.
   }
@@ -31,6 +45,7 @@ export function storedPlayerName(): string | null {
 
 export function clearPlayerName(): void {
   try {
+    localStorage.removeItem(NAME_KEY);
     sessionStorage.removeItem(NAME_KEY);
   } catch {
     /* nothing to clear */
@@ -57,6 +72,18 @@ let pending: Promise<string> | null = null;
 export function ensurePlayerName(): Promise<string> {
   const stored = readStored();
   if (stored) return Promise.resolve(stored);
+  return askForName(null);
+}
+
+/**
+ * Opens the prompt deliberately, pre-filled with the current name - the "change my name"
+ * path, as opposed to the first-visit one. Resolves to whatever the player settles on.
+ */
+export function changePlayerName(): Promise<string> {
+  return askForName(readStored());
+}
+
+function askForName(current: string | null): Promise<string> {
   if (pending) return pending;
 
   pending = new Promise<string>((resolve) => {
@@ -65,11 +92,11 @@ export function ensurePlayerName(): Promise<string> {
     overlay.innerHTML = `
       <div class="ng-card">
         <div class="ng-title">ZONKE</div>
-        <div class="ng-sub">What should we call you?</div>
+        <div class="ng-sub">${current ? 'Change your name' : 'What should we call you?'}</div>
         <input class="ng-input" type="text" maxlength="${MAX_NAME}" autocomplete="nickname"
                autocapitalize="words" spellcheck="false" placeholder="Your name" />
-        <button class="ng-btn" type="button">Play</button>
-        <div class="ng-hint">Used for your turn, the win screen and the leaderboard.</div>
+        <button class="ng-btn" type="button">${current ? 'Save' : 'Play'}</button>
+        <div class="ng-hint">Kept on this device for next time. Used for your turn, the win screen and the leaderboard.</div>
       </div>`;
 
     const style = document.createElement('style');
@@ -77,7 +104,10 @@ export function ensurePlayerName(): Promise<string> {
       #name-gate {
         position: fixed;
         inset: 0;
-        z-index: 10;
+        /* Above the waiting room (z-index 12) and its challenge prompt (13): this can be
+           opened from inside the room to change a name, and a prompt that opens behind the
+           thing that opened it cannot be answered. */
+        z-index: 20;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -130,9 +160,13 @@ export function ensurePlayerName(): Promise<string> {
 
     document.head.appendChild(style);
     document.body.appendChild(overlay);
+    // Phaser listens on the window, so without this a click on this prompt also presses
+    // whatever menu item happens to sit underneath it.
+    swallowPointerEvents(overlay);
 
     const input = overlay.querySelector('.ng-input') as HTMLInputElement;
     const button = overlay.querySelector('.ng-btn') as HTMLButtonElement;
+    if (current) input.value = current;
 
     const finish = (): void => {
       const name = sanitize(input.value);
@@ -154,7 +188,10 @@ export function ensurePlayerName(): Promise<string> {
 
     // Focus is deliberately not forced on touch devices: an unprompted keyboard pop-up
     // resizes the viewport before the player has even read the question.
-    if (!('ontouchstart' in window)) input.focus();
+    if (!('ontouchstart' in window)) {
+      input.focus();
+      input.select();
+    }
   });
 
   return pending;
