@@ -404,12 +404,7 @@ export class ZonkeScene extends Phaser.Scene {
     const opponent = this.players[1 - activeIndexAtLaunch];
 
     const outcome = applyLaunch(active, opponent, result);
-    this.placeMark(activeIndexAtLaunch, slot, col, { result, kind: outcome.kind });
-    // Landing here adds the next part to THIS row's figure, which starts from scratch.
-    this.rowFigureParts[slot][activeIndexAtLaunch] = Math.min(
-      FIGURE_PARTS.length,
-      this.rowFigureParts[slot][activeIndexAtLaunch] + 1
-    );
+    this.applyToBoard(activeIndexAtLaunch, result, outcome.kind, slot, col);
     this.messageText.setText(
       overCharged
         ? `Too much power - the wall threw it back. ${outcome.message}`
@@ -439,16 +434,34 @@ export class ZonkeScene extends Phaser.Scene {
     this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
   }
 
-  /** Records the mark in the cell the ball stopped in. A ZONKE pays out across the whole row. */
-  private placeMark(playerIndex: 0 | 1, slot: number, col: number, mark: CellMark): void {
-    const row = this.boardMarks[slot][playerIndex];
-    if (mark.result === 'ZONKE') {
-      row.forEach((_m, i) => {
-        row[i] = mark;
-      });
-      return;
-    }
-    row[col] = mark;
+  /**
+   * A landing draws one of two things, never both: the next part of that row's shape while
+   * the player is still building, or a single dot for the bullet once they are shooting.
+   * A ZONKE pays that out on every row at once instead of only the row it stopped in.
+   */
+  private applyToBoard(
+    playerIndex: 0 | 1,
+    result: LaunchResult,
+    kind: TurnResultKind,
+    slot: number,
+    col: number
+  ): void {
+    const drawsShape = kind === 'part-drawn' || kind === 'figure-completed';
+    const slots =
+      result === 'ZONKE'
+        ? Array.from({ length: MAX_VISIBLE_ROWS }, (_row, i) => i)
+        : [slot];
+
+    slots.forEach((s) => {
+      if (drawsShape) {
+        this.rowFigureParts[s][playerIndex] = Math.min(
+          FIGURE_PARTS.length,
+          this.rowFigureParts[s][playerIndex] + 1
+        );
+      } else {
+        this.boardMarks[s][playerIndex][col] = { result, kind };
+      }
+    });
   }
 
   private restartGame(): void {
@@ -495,10 +508,6 @@ export class ZonkeScene extends Phaser.Scene {
     const color = sub === 0 ? P1_COLOR : P2_COLOR;
 
     switch (mark.kind) {
-      case 'part-drawn':
-      case 'figure-completed':
-        t.setText('\u25CF').setColor(color);
-        break;
       case 'bullet-loaded':
         t.setText('-').setColor(color);
         break;
