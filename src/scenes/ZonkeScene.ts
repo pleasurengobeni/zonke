@@ -66,8 +66,9 @@ export class ZonkeScene extends Phaser.Scene {
   private cellTextPool: Phaser.GameObjects.Text[][][] = [];
   // Pool of per-row figures: [rowSlot][0=p1/1=p2]
   private miniFigureGfx: Phaser.GameObjects.Graphics[][] = [];
-  // The figure as it stood when a ball landed in that row: [rowSlot][0=p1/1=p2]
-  private figureSnapshots: (boolean[] | undefined)[][] = [];
+  // How many figure parts each row has earned: [rowSlot][0=p1/1=p2]. Every row builds its
+  // own figure from scratch - landing there again adds the next part to THAT row only.
+  private rowFigureParts: number[][] = [];
 
   private turnText!: Phaser.GameObjects.Text;
   private messageText!: Phaser.GameObjects.Text;
@@ -400,8 +401,11 @@ export class ZonkeScene extends Phaser.Scene {
 
     const outcome = applyLaunch(active, opponent, result);
     this.placeMark(activeIndexAtLaunch, slot, col, { result, kind: outcome.kind });
-    // The figure is drawn beside whatever row the ball landed in, on that player's side.
-    this.figureSnapshots[slot][activeIndexAtLaunch] = [...active.drawnParts];
+    // Landing here adds the next part to THIS row's figure, which starts from scratch.
+    this.rowFigureParts[slot][activeIndexAtLaunch] = Math.min(
+      FIGURE_PARTS.length,
+      this.rowFigureParts[slot][activeIndexAtLaunch] + 1
+    );
     this.messageText.setText(
       overCharged
         ? `Too much power - the wall threw it back. ${outcome.message}`
@@ -428,9 +432,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.boardMarks = Array.from({ length: MAX_VISIBLE_ROWS }, () =>
       [0, 1].map(() => ROWS.map(() => undefined as CellMark | undefined))
     );
-    this.figureSnapshots = Array.from({ length: MAX_VISIBLE_ROWS }, () =>
-      [0, 1].map(() => undefined as boolean[] | undefined)
-    );
+    this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
   }
 
   /** Records the mark in the cell the ball stopped in. A ZONKE pays out across the whole row. */
@@ -467,16 +469,17 @@ export class ZonkeScene extends Phaser.Scene {
       )
     );
 
-    // A figure per landing, in the margin level with the row its ball came to rest in.
-    this.figureSnapshots.forEach((row, slot) =>
-      row.forEach((snapshot, sub) => {
-        if (!snapshot) return;
+    // One figure per row, in the margin level with that row, on that player's side. Each
+    // row's figure is built only by the balls that landed in it.
+    this.rowFigureParts.forEach((row, slot) =>
+      row.forEach((count, sub) => {
+        if (count === 0) return;
         const rowY = LOG_TOP + slot * ROW_H;
         this.drawMiniFigure(
           this.miniFigureGfx[slot][sub],
           sub === 0 ? 85 : 715,
           rowY + sub * SUB_H + SUB_H / 2,
-          snapshot,
+          FIGURE_PARTS.map((_part, i) => i < count),
           sub as 0 | 1
         );
       })
