@@ -22,6 +22,8 @@ const LAUNCH_TILT = 0.6; // max launch angle off vertical (radians), giving the 
 const CHARGE_MS = 1900; // hold time to fill the power bar from nothing to maximum
 const POWER_MAX = 1.55; // 1.0 reaches row 10; past that is the ZONKE band, then the wall
 const BALL_R = 8;
+const GAUGE_GAP = 16; // clearance between the resting ball and the power bar
+const GAUGE_H = 14; // height of the horizontal power bar
 
 // Measured from the physics above: the hold window that actually comes to rest inside the
 // ZONKE band. Past the top of it the ball hits the wall hard enough to be thrown back out.
@@ -51,21 +53,17 @@ const TOP_WALL_Y = HEADER_TOP + BALL_R; // the line above ZONKE - the only thing
 const APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2; // centre of row 1
 const APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5); // travel from row 1 to just inside the ZONKE band
 
-interface TurnEntry {
+/** A mark sitting in the cell a ball came to rest in. */
+interface CellMark {
   result: LaunchResult;
   kind: TurnResultKind;
-  figureSnapshot: boolean[]; // which parts are drawn for that player as of this turn
-}
-
-interface RoundEntry {
-  p1?: TurnEntry;
-  p2?: TurnEntry;
 }
 
 export class ZonkeScene extends Phaser.Scene {
   private players!: [PlayerState, PlayerState];
   private activeIndex = 0;
-  private roundLog: RoundEntry[] = [];
+  // Everything a turn draws goes in the cell the ball landed in: [rowSlot][0=p1/1=p2][col]
+  private boardMarks: (CellMark | undefined)[][][] = [];
 
   private killTexts: [Phaser.GameObjects.Text, Phaser.GameObjects.Text] = [
     null as any,
@@ -73,8 +71,11 @@ export class ZonkeScene extends Phaser.Scene {
   ];
   // Pool of cell texts: [rowSlot][0=p1/1=p2][columnIndex]
   private cellTextPool: Phaser.GameObjects.Text[][][] = [];
-  // Pool of per-row mini figures: [rowSlot][0=p1/1=p2]
-  private miniFigureGfx: Phaser.GameObjects.Graphics[][] = [];
+  // One running figure per player, drawn in the margin beside the board.
+  private figureGfx: [Phaser.GameObjects.Graphics, Phaser.GameObjects.Graphics] = [
+    null as any,
+    null as any,
+  ];
 
   private turnText!: Phaser.GameObjects.Text;
   private messageText!: Phaser.GameObjects.Text;
@@ -103,7 +104,7 @@ export class ZonkeScene extends Phaser.Scene {
   create(): void {
     this.players = [createPlayer('Player 1'), createPlayer('Player 2')];
     this.activeIndex = 0;
-    this.roundLog = [];
+    this.resetBoardMarks();
     this.gameOver = false;
 
     this.add
@@ -125,7 +126,11 @@ export class ZonkeScene extends Phaser.Scene {
     this.ball = this.add.circle(0, 0, 8, 0xffd54f);
     this.positionBallAtRest();
 
-    const turnY = this.ballRestY + 30;
+    this.figureGfx = [this.add.graphics(), this.add.graphics()];
+
+    // The power bar sits directly under the ball, clear of the board so it never covers
+    // the shapes being drawn in the cells.
+    const turnY = this.ballRestY + GAUGE_GAP + GAUGE_H + 18;
     this.turnText = this.add
       .text(400, turnY, "Player 1's turn", { fontSize: '20px', color: P1_COLOR })
       .setOrigin(0.5, 0);
@@ -219,11 +224,9 @@ export class ZonkeScene extends Phaser.Scene {
 
   private createCellPool(): void {
     this.cellTextPool = [];
-    this.miniFigureGfx = [];
     for (let r = 0; r < MAX_VISIBLE_ROWS; r++) {
       const rowY = LOG_TOP + r * ROW_H;
       const subPools: Phaser.GameObjects.Text[][] = [];
-      const miniRow: Phaser.GameObjects.Graphics[] = [];
       [0, 1].forEach((sub) => {
         const y = rowY + sub * SUB_H + 4;
         const subTexts: Phaser.GameObjects.Text[] = [];
@@ -235,10 +238,8 @@ export class ZonkeScene extends Phaser.Scene {
           subTexts.push(t);
         });
         subPools.push(subTexts);
-        miniRow.push(this.add.graphics());
       });
       this.cellTextPool.push(subPools);
-      this.miniFigureGfx.push(miniRow);
     }
   }
 
@@ -369,6 +370,15 @@ export class ZonkeScene extends Phaser.Scene {
     return Phaser.Math.Clamp(Math.floor((this.ballX - GRID_LEFT) / CELL_W), 0, ROWS.length - 1);
   }
 
+  /** Which board row the ball is sitting in; a ZONKE rests above row 10, so it pays out there. */
+  private rowSlotUnderBall(): number {
+    return Phaser.Math.Clamp(
+      Math.floor((this.ballY - LOG_TOP) / ROW_H),
+      0,
+      MAX_VISIBLE_ROWS - 1
+    );
+  }
+
   /** The ball has stopped. Whatever cell it is sitting in is the result. */
   private settle(): void {
     this.flying = false;
@@ -381,65 +391,67 @@ export class ZonkeScene extends Phaser.Scene {
     const jackpot = this.ballY < LOG_TOP;
     const result: LaunchResult = jackpot ? 'ZONKE' : (ROWS[this.columnUnderBall()] as Row);
     const knockedBack = this.hitWall && !jackpot;
+    const slot = this.rowSlotUnderBall();
+    const col = this.columnUnderBall();
 
     this.time.delayedCall(450, () => {
-      this.resolveLaunch(this.activeIndex as 0 | 1, result, knockedBack);
+      this.resolveLaunch(this.activeIndex as 0 | 1, result, slot, col, knockedBack);
     });
   }
 
-  /** Vertical power bar running alongside the rows, so the height it buys is readable. */
+  /** Horizontal power bar sitting under the ball, clear of the cells the shapes go in. */
   private drawPowerGauge(): void {
     const g = this.powerGauge;
     g.clear();
 
-    const x = GRID_LEFT - 34;
-    const w = 10;
-    const top = TOP_WALL_Y; // the ball can never come to rest above the wall
-    const bottom = APEX_FLOOR_Y;
+    const x = GRID_LEFT;
+    const w = ROWS.length * CELL_W;
+    const y = this.ballRestY + GAUGE_GAP;
+    const zonkeStart = x + (ZONKE_POWER_MIN / POWER_MAX) * w;
+    const zonkeEnd = x + (ZONKE_POWER_MAX / POWER_MAX) * w;
 
     g.fillStyle(0x000000, 0.35);
-    g.fillRect(x, top, w, bottom - top);
+    g.fillRect(x, y, w, GAUGE_H);
 
-    // The ZONKE band - the stretch of the bar that wins the jackpot.
-    g.fillStyle(0xffd54f, 0.25);
-    g.fillRect(x, top, w, LOG_TOP - top);
+    // The stretch of the bar that comes to rest in the ZONKE band, then the over-power zone
+    // past it where the wall throws the ball back down.
+    g.fillStyle(0xffd54f, 0.22);
+    g.fillRect(zonkeStart, y, zonkeEnd - zonkeStart, GAUGE_H);
+    g.fillStyle(0xff5252, 0.22);
+    g.fillRect(zonkeEnd, y, x + w - zonkeEnd, GAUGE_H);
 
     if (this.power > 0) {
-      const over = this.power > ZONKE_POWER_MAX;
-      const fillTop = Phaser.Math.Clamp(this.restingYFor(this.power), top, bottom);
-      const color = over ? 0xff5252 : this.power >= ZONKE_POWER_MIN ? 0xffd54f : 0x4caf50;
+      const fill = (this.power / POWER_MAX) * w;
+      const color =
+        this.power > ZONKE_POWER_MAX
+          ? 0xff5252
+          : this.power >= ZONKE_POWER_MIN
+            ? 0xffd54f
+            : 0x4caf50;
       g.fillStyle(color, 0.95);
-      g.fillRect(x, fillTop, w, bottom - fillTop);
-
-      // Past the jackpot window the bar is pegged, so show the overshoot growing outward
-      // instead - that is how much the wall is about to throw the ball back down.
-      if (over) {
-        const spill = ((this.power - ZONKE_POWER_MAX) / (POWER_MAX - ZONKE_POWER_MAX)) * 14;
-        g.fillStyle(0xff5252, 0.85);
-        g.fillRect(x - spill - 2, top, spill, 6);
-      }
+      g.fillRect(x, y, fill, GAUGE_H);
     }
 
     g.lineStyle(1, 0xffffff, 0.4);
-    g.strokeRect(x, top, w, bottom - top);
+    g.strokeRect(x, y, w, GAUGE_H);
     g.lineStyle(1, 0xffd54f, 0.9);
-    g.lineBetween(x - 3, LOG_TOP, x + w + 3, LOG_TOP);
+    g.lineBetween(zonkeStart, y - 3, zonkeStart, y + GAUGE_H + 3);
+    g.lineStyle(1, 0xff5252, 0.9);
+    g.lineBetween(zonkeEnd, y - 3, zonkeEnd, y + GAUGE_H + 3);
   }
 
   private resolveLaunch(
     activeIndexAtLaunch: 0 | 1,
     result: LaunchResult,
+    slot: number,
+    col: number,
     overCharged = false
   ): void {
     const active = this.players[activeIndexAtLaunch];
     const opponent = this.players[1 - activeIndexAtLaunch];
 
     const outcome = applyLaunch(active, opponent, result);
-    this.pushRoundEntry(activeIndexAtLaunch, {
-      result,
-      kind: outcome.kind,
-      figureSnapshot: [...active.drawnParts],
-    });
+    this.placeMark(activeIndexAtLaunch, slot, col, { result, kind: outcome.kind });
     this.messageText.setText(
       overCharged
         ? `Too much power - the wall threw it back. ${outcome.message}`
@@ -462,17 +474,22 @@ export class ZonkeScene extends Phaser.Scene {
     this.armBall();
   }
 
-  private pushRoundEntry(playerIndex: 0 | 1, entry: TurnEntry): void {
-    if (playerIndex === 0) {
-      this.roundLog.push({ p1: entry });
-    } else {
-      const current = this.roundLog[this.roundLog.length - 1];
-      if (current && !current.p2) {
-        current.p2 = entry;
-      } else {
-        this.roundLog.push({ p2: entry });
-      }
+  private resetBoardMarks(): void {
+    this.boardMarks = Array.from({ length: MAX_VISIBLE_ROWS }, () =>
+      [0, 1].map(() => ROWS.map(() => undefined as CellMark | undefined))
+    );
+  }
+
+  /** Records the mark in the cell the ball stopped in. A ZONKE pays out across the whole row. */
+  private placeMark(playerIndex: 0 | 1, slot: number, col: number, mark: CellMark): void {
+    const row = this.boardMarks[slot][playerIndex];
+    if (mark.result === 'ZONKE') {
+      row.forEach((_m, i) => {
+        row[i] = mark;
+      });
+      return;
     }
+    row[col] = mark;
   }
 
   private restartGame(): void {
@@ -485,53 +502,50 @@ export class ZonkeScene extends Phaser.Scene {
       this.killTexts[i].setText(`Kills: ${p.kills}`);
     });
 
-    // Clear the whole cell pool + mini figures.
     this.cellTextPool.forEach((row) => row.forEach((sub) => sub.forEach((t) => t.setText(''))));
-    this.miniFigureGfx.forEach((row) => row.forEach((g) => g.clear()));
 
-    // Anchor the newest round to the bottom-most slot; older rounds fill upward.
-    const visible = this.roundLog.slice(-MAX_VISIBLE_ROWS);
-    const startSlot = MAX_VISIBLE_ROWS - visible.length;
+    // Every mark stays in the cell its ball landed in, so the board fills up as it is played.
+    this.boardMarks.forEach((row, slot) =>
+      row.forEach((sub, subIndex) =>
+        sub.forEach((mark, col) => {
+          if (mark) this.paintMark(slot, subIndex as 0 | 1, col, mark);
+        })
+      )
+    );
 
-    visible.forEach((round, i) => {
-      const slot = startSlot + i;
-      this.paintTurn(slot, 0, round.p1);
-      this.paintTurn(slot, 1, round.p2);
+    // Each player's figure is built up once, in the margin beside the board.
+    this.players.forEach((p, i) => {
+      this.drawMiniFigure(
+        this.figureGfx[i],
+        i === 0 ? 66 : 734,
+        LOG_TOP + 90,
+        p.drawnParts,
+        i as 0 | 1,
+        2.4
+      );
     });
   }
 
-  private paintTurn(slot: number, sub: 0 | 1, entry?: TurnEntry): void {
-    if (!entry) return;
+  private paintMark(slot: number, sub: 0 | 1, col: number, mark: CellMark): void {
+    const t = this.cellTextPool[slot][sub][col];
     const color = sub === 0 ? P1_COLOR : P2_COLOR;
-    const rowTexts = this.cellTextPool[slot][sub];
 
-    if (entry.result === 'ZONKE') {
-      // Landing on ZONKE isn't tied to one column - it marks every cell in the player's own
-      // row: '-' if it loaded bullets, '●' if it drew the next shape.
-      const symbol = entry.kind === 'bullet-loaded' ? '-' : '\u25CF';
-      rowTexts.forEach((t) => t.setText(symbol).setColor(color));
-    } else {
-      const idx = ROWS.indexOf(entry.result as Row);
-      const t = rowTexts[idx];
-      switch (entry.kind) {
-        case 'bullet-loaded':
-          t.setText('-').setColor(color);
-          break;
-        case 'kill':
-        case 'instant-hit':
-          t.setText('X').setColor(KILL_COLOR);
-          break;
-        case 'row-already-dead':
-          t.setText('\u00B7').setColor(NEUTRAL_COLOR);
-          break;
-      }
+    switch (mark.kind) {
+      case 'part-drawn':
+      case 'figure-completed':
+        t.setText('\u25CF').setColor(color);
+        break;
+      case 'bullet-loaded':
+        t.setText('-').setColor(color);
+        break;
+      case 'kill':
+      case 'instant-hit':
+        t.setText('X').setColor(KILL_COLOR);
+        break;
+      case 'row-already-dead':
+        t.setText('\u00B7').setColor(NEUTRAL_COLOR);
+        break;
     }
-
-    // Draw this player's figure-so-far in the margin next to this row (P1 = left, P2 = right).
-    const rowY = LOG_TOP + slot * ROW_H;
-    const figX = sub === 0 ? 85 : 715;
-    const figY = rowY + sub * SUB_H + SUB_H / 2;
-    this.drawMiniFigure(this.miniFigureGfx[slot][sub], figX, figY, entry.figureSnapshot, sub);
   }
 
   private drawMiniFigure(
@@ -539,36 +553,38 @@ export class ZonkeScene extends Phaser.Scene {
     x: number,
     y: number,
     drawnParts: boolean[],
-    sub: 0 | 1
+    sub: 0 | 1,
+    scale = 1
   ): void {
     g.clear();
     g.lineStyle(2, sub === 0 ? P1_COLOR_HEX : P2_COLOR_HEX, 1);
     // Player 2's figure is a mirror image of player 1's (gun arm points the other way).
-    const m = sub === 0 ? 1 : -1;
+    const m = (sub === 0 ? 1 : -1) * scale;
+    const v = scale; // vertical scale
 
     const has = (part: (typeof FIGURE_PARTS)[number]) => drawnParts[FIGURE_PARTS.indexOf(part)];
 
     if (has('head')) {
-      g.strokeCircle(x, y - 12, 5);
+      g.strokeCircle(x, y - 12 * v, 5 * v);
     }
     if (has('spine')) {
-      g.lineBetween(x, y - 7, x, y + 8);
+      g.lineBetween(x, y - 7 * v, x, y + 8 * v);
     }
     if (has('leftArm')) {
-      g.lineBetween(x, y - 3, x - 9 * m, y + 5);
+      g.lineBetween(x, y - 3 * v, x - 9 * m, y + 5 * v);
     }
     if (has('rightArm')) {
-      g.lineBetween(x, y - 3, x + 10 * m, y - 5);
+      g.lineBetween(x, y - 3 * v, x + 10 * m, y - 5 * v);
     }
     if (has('leftLeg')) {
-      g.lineBetween(x, y + 8, x - 8 * m, y + 18);
+      g.lineBetween(x, y + 8 * v, x - 8 * m, y + 18 * v);
     }
     if (has('rightLeg')) {
-      g.lineBetween(x, y + 8, x + 10 * m, y + 16);
+      g.lineBetween(x, y + 8 * v, x + 10 * m, y + 16 * v);
     }
     if (has('gun')) {
-      g.strokeRect(x + 10 * m - (m < 0 ? 5 : 0), y - 8, 5, 3);
-      g.strokeRect(x + 13 * m - (m < 0 ? 3 : 0), y - 6, 3, 4);
+      g.strokeRect(x + 10 * m - (m < 0 ? 5 * v : 0), y - 8 * v, 5 * v, 3 * v);
+      g.strokeRect(x + 13 * m - (m < 0 ? 3 * v : 0), y - 6 * v, 3 * v, 4 * v);
     }
   }
 }
