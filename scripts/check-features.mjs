@@ -198,6 +198,11 @@ for (const [label, w, h] of sizes) {
   await page.waitForTimeout(400);
   const rate = await page.evaluate(() => {
     const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    // Each simulated opening would otherwise fire a real analytics post - hundreds of them,
+    // filling the events table with rows no player ever caused. Silence the network for the
+    // length of the simulation only.
+    const realFetch = window.fetch;
+    window.fetch = () => Promise.resolve(new Response('', { status: 204 }));
     const MATCHES = 500;
     const TURNS = 70; // a measured match
     let withNone = 0;
@@ -225,6 +230,7 @@ for (const [label, w, h] of sizes) {
     s.splitSeenThisGame = false;
     s.splitHighlight.setVisible(false);
     s.splitLabel.setVisible(false);
+    window.fetch = realFetch;
     return { perMatch: total / MATCHES, noneRate: withNone / MATCHES, mostInOneMatch };
   });
   console.log(`  opens ${rate.perMatch.toFixed(2)}x per 70-turn match; ${Math.round(rate.noneRate * 100)}% of matches never see one; most in one match: ${rate.mostInOneMatch}`);

@@ -412,7 +412,11 @@ export class ZonkeScene extends Phaser.Scene {
 
     this.createCellPool();
 
-    this.ballRestY = TABLE_BOTTOM + 26 * S;
+    // Parked clear of the board's bottom border rather than sitting right on it - at 26px
+    // the ball read as part of the line it was resting against. Power still maps to the
+    // same rows: launchWithPower() aims at an absolute resting height, so a lower start
+    // just means a fractionally longer flight, not a different landing.
+    this.ballRestY = TABLE_BOTTOM + 42 * S;
     this.ball = this.add.circle(0, 0, BALL_R, 0xffd54f);
     this.positionBallAtRest();
 
