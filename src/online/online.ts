@@ -114,6 +114,7 @@ export class OnlineGame {
       youName: this.name,
       onShoot: (power: number) => this.net.shoot(power),
       onLeave: () => this.leaveMatch(),
+      onHome: () => this.backToLocalGame(),
       // Both players report the outcome; the server records it only if they agree, and
       // that record is what the info button in the room shows.
       onResult: (winnerIndex: 0 | 1, kills: [number, number]) => this.net.reportResult(winnerIndex, kills),

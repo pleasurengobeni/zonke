@@ -170,6 +170,50 @@ const clickButton = (page, match) =>
   await page.close();
 }
 
+// --- a way home from the result screen, win or lose ---------------------------------
+for (const [label, winnerIndex] of [['after a win', 0], ['after a loss', 1]]) {
+  console.log(`\n=== Home, ${label}`);
+  const { page } = await open('1');
+  await page.evaluate((winnerIndex) => {
+    const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    s.players[winnerIndex].kills = 3;
+    s.players[1 - winnerIndex].kills = 1;
+    s.players.forEach((p) => p.deadRows.fill(true));
+    s.launchWithPower(0.5);
+  }, winnerIndex);
+  await page.waitForTimeout(4500);
+
+  const clicked = await page.evaluate(() => {
+    const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    const label = s.children.list.find((o) => o.type === 'Text' && o.text === 'Home' && o.depth >= 20);
+    if (!label) return false;
+    const box = s.children.list.find(
+      (o) => o.type === 'Rectangle' && o.input && Math.abs(o.y - label.y) < 4 && Math.abs(o.x - label.x) < 4
+    );
+    if (!box) return false;
+    box.emit('pointerdown', {}, 0, 0, { stopPropagation() {} });
+    return true;
+  });
+  if (!clicked) fail(`no Home button ${label}`);
+  await page.waitForTimeout(1500);
+
+  const home = await page.evaluate(() => {
+    const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    return {
+      mode: s.mode ? s.mode.name : null,
+      menuUp: s.children.list.some((o) => o.type === 'Text' && /Choose difficulty/.test(o.text ?? '')),
+      resultGone: !s.children.list.some((o) => o.type === 'Text' && /WINS!/.test(o.text ?? '')),
+      gameOver: s.gameOver,
+    };
+  });
+  console.log(`  ${label}: menu=${home.menuUp} mode=${home.mode} result cleared=${home.resultGone}`);
+  if (!home.menuUp) fail(`Home ${label} did not return to the menu`);
+  if (home.mode !== null) fail(`Home ${label} left a difficulty chosen (${home.mode})`);
+  if (!home.resultGone) fail(`the result screen is still up after Home ${label}`);
+  if (home.gameOver) fail(`still in a finished game after Home ${label}`);
+  await page.close();
+}
+
 await browser.close();
 console.log(failed ? '\nFAILED' : '\nALL CHECKS PASSED');
 process.exit(failed ? 1 : 0);

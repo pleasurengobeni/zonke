@@ -557,8 +557,13 @@ for (const [label, w, h] of sizes) {
     s.matchEndedAt = s.time.now;
     s.showCelebration(s.players[0], 'test win');
     await new Promise((r) => setTimeout(r, 600));
-    const buttons = s.children.list.filter((o) => o.type === 'Rectangle' && o.depth === 22 && o.input);
-    buttons[buttons.length - 1].emit('pointerdown', {}, 0, 0, { stopPropagation() {} }); // Play again
+    // By label, not by position: the result screen has a Home button now as well, and
+    // "the last button" quietly became the wrong one.
+    const label = s.children.list.find((o) => o.type === 'Text' && o.text === 'Play again' && o.depth >= 20);
+    const box = s.children.list.find(
+      (o) => o.type === 'Rectangle' && o.input && Math.abs(o.y - label.y) < 4 && Math.abs(o.x - label.x) < 4
+    );
+    box.emit('pointerdown', {}, 0, 0, { stopPropagation() {} });
   });
   await page.waitForTimeout(1200);
   const restarted = await page.evaluate(() => {

@@ -27,6 +27,8 @@ export interface OnlineSceneData {
   youName: string;
   onShoot(power: number): void;
   onLeave(): void;
+  /** Leave online play entirely and go back to the menu. */
+  onHome(): void;
   onResult(winnerIndex: 0 | 1, kills: [number, number]): void;
 }
 
@@ -487,6 +489,21 @@ export class OnlineScene extends Phaser.Scene {
       event.stopPropagation();
       this.opts.onLeave();
     });
-    this.endPanel = [veil, heading, sub, btn, btnText];
+
+    const homeBtn = this.add
+      .rectangle(w / 2, h * 0.68, Math.min(360 * this.s, w * 0.8), 48 * this.s, 0xffffff, 0.08)
+      .setStrokeStyle(1, 0xffffff, 0.35)
+      .setDepth(21)
+      .setInteractive({ useHandCursor: true });
+    const homeText = this.add
+      .text(w / 2, h * 0.68, 'Home', { fontSize: this.fs(20), color: '#ffffff' })
+      .setOrigin(0.5)
+      .setDepth(22);
+    homeBtn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+      event.stopPropagation();
+      this.opts.onHome();
+    });
+
+    this.endPanel = [veil, heading, sub, btn, btnText, homeBtn, homeText];
   }
 }

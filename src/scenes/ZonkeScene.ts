@@ -2022,7 +2022,10 @@ export class ZonkeScene extends Phaser.Scene {
     }
 
     const play = makeButton('Play again', 0xffd54f, () => this.restartGame());
-    const buttons = [play];
+    // Somewhere to go that is not another match: back to the menu, where the difficulties,
+    // the leaderboard and online play are.
+    const home = makeButton('Home', 0xffffff, () => this.goHome());
+    const buttons = [play, home];
 
     // Laid out as a measured top-down stack, the same way the difficulty picker is, so
     // nothing overlaps once wrapping and font-fitting have had their say.
@@ -2197,6 +2200,12 @@ export class ZonkeScene extends Phaser.Scene {
   private restartGame(): void {
     if (!this.gameOver) return;
     this.scene.restart({ mode: this.mode });
+  }
+
+  /** Back to the menu: the same board, rebuilt with no difficulty chosen yet. */
+  private goHome(): void {
+    track('went_home', { from: this.gameOver ? 'result' : 'match' });
+    this.scene.restart({ mode: null });
   }
 
   /**

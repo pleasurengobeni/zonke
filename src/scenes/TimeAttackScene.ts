@@ -438,5 +438,21 @@ export class TimeAttackScene extends Phaser.Scene {
       event.stopPropagation();
       this.scene.restart();
     });
+
+    // And a way out that is not another round.
+    const homeBtn = this.add
+      .rectangle(CENTER_X, midY + 150 * S + btnH + 8 * S, btnW, btnH, 0xffffff, 0.06)
+      .setOrigin(0.5, 0)
+      .setDepth(2)
+      .setStrokeStyle(1, 0xffffff, 0.3)
+      .setInteractive({ useHandCursor: true });
+    this.add
+      .text(CENTER_X, midY + 150 * S + btnH + 8 * S + btnH / 2, 'Home', { fontSize: fs(17), color: '#ffffff' })
+      .setOrigin(0.5)
+      .setDepth(3);
+    homeBtn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+      event.stopPropagation();
+      this.scene.start('ZonkeScene');
+    });
   }
 }
