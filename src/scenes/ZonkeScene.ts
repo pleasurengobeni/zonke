@@ -18,7 +18,7 @@ import {
 const FRICTION = 0.21; // speed scrubbed off every 16ms frame
 const STOP_SPEED = 0.35; // below this the ball has come to rest
 const WALL_BOUNCE = 0.85; // energy kept bouncing off a wall (sides, and the one above ZONKE)
-const LAUNCH_TILT = 0.6; // max launch angle off vertical (radians), giving the sideways spread
+const BOUNCE_SPREAD = 1.0; // how wide the wall can kick the ball off (radians either side)
 const CHARGE_MS = 1900; // hold time to fill the power bar from nothing to maximum
 const POWER_MAX = 1.55; // 1.0 reaches row 10; past that is the ZONKE band, then the wall
 const BALL_R = 8;
@@ -279,10 +279,9 @@ export class ZonkeScene extends Phaser.Scene {
     // Stepping in whole frames loses about half a frame of travel, so aim slightly past the
     // target - that keeps the ball stopping exactly where the gauge promised it would.
     const distance = target + Math.sqrt(2 * FRICTION * target) / 2;
-    const tilt = Phaser.Math.FloatBetween(-LAUNCH_TILT, LAUNCH_TILT);
-    const speed = Math.sqrt((2 * FRICTION * distance) / Math.cos(tilt));
-    this.ballVx = speed * Math.sin(tilt);
-    this.ballVy = -speed * Math.cos(tilt);
+    // Straight up the board - the shot has no sideways component of its own.
+    this.ballVx = 0;
+    this.ballVy = -Math.sqrt(2 * FRICTION * distance);
 
     this.columnHighlight.setVisible(true);
     this.columnHighlight.setFillStyle(this.activeIndex === 0 ? P1_COLOR_HEX : P2_COLOR_HEX, 0.15);
@@ -341,7 +340,12 @@ export class ZonkeScene extends Phaser.Scene {
     // had going up now carries it back down, so the harder you overshot, the lower you land.
     if (this.ballY < TOP_WALL_Y) {
       this.ballY = TOP_WALL_Y;
-      this.ballVy = Math.abs(this.ballVy) * WALL_BOUNCE;
+      // Coming off the wall is the only thing that sends the ball sideways: whatever
+      // momentum it had left comes back down on a random angle.
+      const speed = Math.hypot(this.ballVx, this.ballVy) * WALL_BOUNCE;
+      const angle = Phaser.Math.FloatBetween(-BOUNCE_SPREAD, BOUNCE_SPREAD);
+      this.ballVx = speed * Math.sin(angle);
+      this.ballVy = speed * Math.cos(angle);
       this.hitWall = true;
     }
 
