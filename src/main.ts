@@ -42,30 +42,57 @@ function bootPhaser(): Phaser.Game {
   return game;
 }
 
-// 3D is opt-in while it is being built out, and comes in two shapes:
-//
-//   ?r3d=1      the ORIGINAL 2D board, with the ball and figures replaced by real 3D
-//               meshes on a transparent layer above it. The board, its layout and every
-//               number on it are the 2D game's own - only those two things are 3D.
-//   ?r3d=table  the full 3D table: the whole board rebuilt as a tilted surface. Parked.
-//
-// Both load dynamically, so Three.js costs nothing to anyone who does not ask for it.
 const params = new URLSearchParams(location.search);
+
+// A tab left open is not a player: after a couple of minutes without input the game asks
+// whether anyone is there, and ends the session if nobody answers. Without it, every
+// engagement figure is inflated by time when nobody was at the screen.
+void import('./idle').then(({ IdleWatcher }) => {
+  const idle = new IdleWatcher({
+    // Overridable in dev only, so the browser-driven checks need not wait two minutes.
+    idleMs: import.meta.env.DEV ? Number(params.get('idleMs')) || undefined : undefined,
+    graceMs: import.meta.env.DEV ? Number(params.get('graceMs')) || undefined : undefined,
+    onExpire: () => {
+      // Free anyone who was waiting on this player.
+      window.dispatchEvent(new CustomEvent('zonke:session-expired'));
+    },
+  });
+  if (import.meta.env.DEV) (window as Window & { zonkeIdle?: unknown }).zonkeIdle = idle;
+});
+
+// The board everyone gets is the 2D one, with its ball and figures drawn as real lit 3D
+// meshes on a transparent layer above it. The layout, the grid, the labels and every
+// number on the board stay the flat game's own - the overlay replaces two things and
+// nothing else, reading the scene's own pixel coordinates so there is no second layout
+// that could drift from the first.
+//
+// It degrades rather than breaks. The board boots flat and playable, and the meshes take
+// over only once they are actually drawing; a device with no WebGL, or a chunk that never
+// arrives, simply keeps the flat ball and figures instead of ending up with a board that
+// has nothing on it.
+//
+//   ?flat=1     keeps the wholly flat board.
+//   ?r3d=table  the whole board rebuilt as a tilted 3D table, on the headless engine in
+//               Match.ts. Parked - the flat layout reads better - but kept because that
+//               engine is what online play already runs on.
 const renderer3d = params.get('r3d');
 if (renderer3d === 'table') {
   track('renderer_3d', { variant: 'table' });
   void import('./three/main3d').then((m) => m.start3D());
-} else if (renderer3d !== null) {
-  track('renderer_3d', { variant: 'actors' });
-  const game = bootPhaser();
-  // The board boots flat and playable; the overlay takes over the ball and the figures
-  // once it is actually drawing, and never if Three or WebGL cannot start.
-  void import('./three/actors')
-    .then((m) => m.attach3DActors(game))
-    .catch((error) => console.warn('3D actors failed to load, keeping the flat board', error));
-  if (params.has('online')) void import('./online/online').then((m) => m.startOnline(game));
 } else {
   const game = bootPhaser();
+  if (!params.has('flat')) {
+    void import('./three/actors')
+      .then((m) => {
+        const overlay = m.attach3DActors(game);
+        track('renderer_3d', { variant: overlay ? 'actors' : 'flat-fallback' });
+      })
+      .catch((error) => {
+        // Nothing to do but carry on flat - which is exactly what the board is already doing.
+        track('renderer_3d', { variant: 'flat-fallback' });
+        console.warn('3D actors failed to load, keeping the flat board', error);
+      });
+  }
   // ?online=1 goes straight to the waiting room; the mode picker gets there too.
   if (params.has('online')) void import('./online/online').then((m) => m.startOnline(game));
 }

@@ -1,19 +1,67 @@
 // Fire-and-forget analytics: every call posts to the API and swallows any failure, since
 // a dropped stats event should never be allowed to interrupt or crash actual gameplay.
-const SESSION_KEY = 'zonke_session_id';
+//
+// Two identities, not one. The visitor id lasts forever and answers "is this the same
+// person coming back"; the session id covers ONE visit and answers "how long did they
+// play". Both used to be the same localStorage value, which made every session look as
+// long as the entire history of that browser - an average measured in days.
+const VISITOR_KEY = 'zonke.visitorId';
+const SESSION_KEY = 'zonke.sessionId';
+const SESSION_SEEN_KEY = 'zonke.sessionLastSeen';
 
-function sessionId(): string {
+/** A gap this long without activity means the next event belongs to a new visit. */
+export const SESSION_IDLE_MS = 30 * 60 * 1000;
+
+function newId(): string {
   try {
-    let id = localStorage.getItem(SESSION_KEY);
+    return crypto.randomUUID();
+  } catch {
+    return `id-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function visitorId(): string {
+  try {
+    let id = localStorage.getItem(VISITOR_KEY);
     if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem(SESSION_KEY, id);
+      id = newId();
+      localStorage.setItem(VISITOR_KEY, id);
     }
     return id;
   } catch {
     // localStorage can throw in a private tab - fall back to a per-load id rather than
     // let analytics ever be the reason the page breaks.
-    return crypto.randomUUID();
+    return newId();
+  }
+}
+
+/**
+ * The current visit. Rotates when the tab has been idle longer than SESSION_IDLE_MS, so a
+ * browser left open overnight does not report one enormous session the next morning.
+ */
+function sessionId(): string {
+  try {
+    const now = Date.now();
+    const lastSeen = Number(sessionStorage.getItem(SESSION_SEEN_KEY) ?? 0);
+    let id = sessionStorage.getItem(SESSION_KEY);
+    if (!id || !lastSeen || now - lastSeen > SESSION_IDLE_MS) id = newId();
+    sessionStorage.setItem(SESSION_KEY, id);
+    sessionStorage.setItem(SESSION_SEEN_KEY, String(now));
+    return id;
+  } catch {
+    return newId();
+  }
+}
+
+/** Ends the current visit; the next event starts a fresh one. */
+export function startNewSession(): string {
+  try {
+    const id = newId();
+    sessionStorage.setItem(SESSION_KEY, id);
+    sessionStorage.setItem(SESSION_SEEN_KEY, String(Date.now()));
+    return id;
+  } catch {
+    return newId();
   }
 }
 
@@ -33,6 +81,7 @@ function flush(useBeacon = false): void {
   const events = queue.splice(0, queue.length);
   const body = JSON.stringify({
     sessionId: sessionId(),
+    visitorId: visitorId(),
     events,
     path: location.pathname,
     referrer: document.referrer || undefined,
@@ -91,6 +140,7 @@ export function track(type: string, payload?: Record<string, unknown>): void {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId: sessionId(),
+        visitorId: visitorId(),
         type,
         payload,
         path: location.pathname,

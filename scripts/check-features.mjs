@@ -11,7 +11,11 @@
 // window.zonkeGame, the dev-only handle main.ts exposes - see the note there.
 import { chromium } from 'playwright';
 
-const URL = process.env.LAYOUT_TEST_URL ?? 'http://localhost:5173/';
+// The 3D ball and figures are the default now, and they replace the flat ones - so this
+// suite, which is about the flat board's own drawing, asks for the flat board explicitly.
+// check-3d.mjs covers the overlay, including that its layout matches this one exactly.
+const ROOT = process.env.LAYOUT_TEST_URL ?? 'http://localhost:5173/';
+const URL = `${ROOT}?flat=1`;
 const OUT = process.env.SHOT_DIR ?? '/tmp';
 const sizes = [['phone', 390, 844], ['desktop', 1366, 768]];
 const browser = await chromium.launch();
@@ -122,6 +126,46 @@ for (const [label, w, h] of sizes) {
     }
   }
 
+  // 3c. The red row: your move plays as normal, the opponent loses two of theirs.
+  const penalty = await page.evaluate(async () => {
+    const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    for (let i = 0; i < 200 && !(s.ready && s.activeIndex === 0); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Give the opponent something to lose on the row we are about to hit: a part-built
+    // figure and a bullet part-way across.
+    let power = 0.5;
+    for (let t = 0; t <= 1.55; t += 0.005) {
+      if (s.rowSlotAt(s.restingYFor(t)) === s.rowSlotAt(s.restingYFor(0.5)) && s.restingYFor(t) > 0) power = t;
+    }
+    const row = s.rowSlotAt(s.restingYFor(power));
+    s.penaltyRow = row;
+    s.splitRow = null;
+    s.rowFigureParts[row][1] = 7;
+    s.rowBullets[row][1] = 3;
+    const before = { parts: s.rowFigureParts[row][1], bullets: s.rowBullets[row][1], mine: s.rowFigureParts[row][0] };
+
+    s.launchWithPower(power);
+    for (let i = 0; i < 400 && !(s.ready || s.gameOver); i++) await new Promise((r) => setTimeout(r, 40));
+    await new Promise((r) => setTimeout(r, 300));
+    return {
+      row,
+      before,
+      after: { parts: s.rowFigureParts[row][1], bullets: s.rowBullets[row][1], mine: s.rowFigureParts[row][0] },
+      message: s.messageText.text,
+      movedOn: s.penaltyRow !== row,
+    };
+  });
+  const lost = (penalty.before.bullets + penalty.before.parts) - (penalty.after.bullets + penalty.after.parts);
+  console.log(`  red row: opponent ${penalty.before.bullets}b/${penalty.before.parts}p -> ${penalty.after.bullets}b/${penalty.after.parts}p (lost ${lost})`);
+  console.log(`  message: ${penalty.message}`);
+  if (lost !== 2) fail(`the red row took ${lost} moves off the opponent, expected 2`);
+  // Bullet steps go first - that is the progress that was nearly a kill.
+  if (penalty.after.bullets !== penalty.before.bullets - 2) fail('the red row did not take the bullet steps first');
+  if (penalty.after.mine <= penalty.before.mine) fail('the player did not get their own move as well');
+  if (!/-2 to /.test(penalty.message)) fail(`the message does not report the penalty: "${penalty.message}"`);
+  if (!penalty.movedOn) fail('the red row stayed put after being claimed');
+
   // 4. Open a green row the way the game does, then aim a shot at the row it chose.
   const split = await page.evaluate(async () => {
     const s = window.zonkeGame.scene.getScene('ZonkeScene');
@@ -202,6 +246,19 @@ for (const [label, w, h] of sizes) {
       h: s.scale.height,
     }));
   });
+  const march = await page.evaluate(async () => {
+    const s = window.zonkeGame.scene.getScene('ZonkeScene');
+    const graphics = s.children.list.filter((o) => o.type === 'Graphics' && o.depth >= 20);
+    const sample = () => graphics.map((g) => (g.commandBuffer ?? []).length).reduce((a, b) => a + b, 0);
+    const first = sample();
+    await new Promise((r) => setTimeout(r, 400));
+    const second = sample();
+    return { layers: graphics.length, first, second };
+  });
+  console.log(`  victory march: ${march.layers} animated layer(s), ${march.first} -> ${march.second} draw commands`);
+  if (march.layers === 0) fail('nothing is being drawn over the win screen');
+  if (march.first === 0) fail('the marching figures are not drawn');
+
   await page.screenshot({ path: `${OUT}/${label}-4-win.png` });
   const big = win.find((t) => t.text.includes('WINS!'));
   if (!big) fail('no winner headline on the win screen');
@@ -232,8 +289,15 @@ for (const [label, w, h] of sizes) {
   if (!board) fail(`fastest-wins board did not load after saving: ${JSON.stringify(after.slice(-3))}`);
   else {
     console.log('  leaderboard: ' + board.replace(/\n/g, ' | '));
-    // The run just saved was a win, so it has to be on the fastest board.
-    if (!/Ntsako/.test(board)) fail('the win just saved is missing from the fastest-wins board');
+    // Whether this particular run makes the top ten depends on what else is in the
+    // database, so that is not the thing to assert - that it was SAVED, with the right
+    // difficulty, is. The board itself only has to be a sorted list of distinct players.
+    const saved = await (await fetch('http://127.0.0.1:4000/scores/top?mode=zonke&sort=fastest&difficulty=Easy&limit=50&perPlayer=0')).json();
+    const mine = saved.find((r) => r.name === 'Ntsako' && r.durationMs === 251000);
+    if (!mine) fail('the win was not saved to the Easy board');
+    else if (mine.won !== 1) fail(`the win was saved with won=${mine.won}`);
+    const names = board.split('\n').slice(1).map((l) => l.replace(/^\d+\. /, '').split('  -  ')[0]);
+    if (new Set(names).size !== names.length) fail(`a player appears twice on the board: ${names.join(', ')}`);
     // Times must climb down the list - that is the whole ordering.
     const times = [...board.matchAll(/(\d+):(\d\d)/g)].map((m) => Number(m[1]) * 60 + Number(m[2]));
     if (times.some((t, i) => i > 0 && t < times[i - 1])) fail(`fastest-wins list is not sorted: ${times}`);

@@ -161,9 +161,10 @@ app.post('/events/batch', rateLimit, (req, res) => {
   const referrer = cleanString(req.body?.referrer, 300) ?? null;
   const viewport = cleanString(req.body?.viewport, 20) ?? null;
 
+  const visitorId = cleanString(req.body?.visitorId, 64) ?? null;
   const insert = db.prepare(
-    `INSERT INTO events (session_id, event_type, payload, path, referrer, user_agent, viewport)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO events (session_id, event_type, payload, path, referrer, user_agent, viewport, visitor_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   );
   // One transaction for the batch: a hundred inserts otherwise means a hundred fsyncs.
   const writeAll = db.transaction((rows: unknown[]) => {
@@ -173,7 +174,7 @@ app.post('/events/batch', rateLimit, (req, res) => {
       const type = cleanString(event.type, 64);
       if (!type) continue;
       const payload = event.payload === undefined ? null : JSON.stringify(event.payload).slice(0, 2000);
-      insert.run(sessionId, type, payload, path_, referrer, userAgent, viewport);
+      insert.run(sessionId, type, payload, path_, referrer, userAgent, viewport, visitorId);
       written += 1;
     }
     return written;
@@ -195,10 +196,11 @@ app.post('/events', rateLimit, (req, res) => {
   const viewport = cleanString(req.body?.viewport, 20) ?? null;
   const userAgent = cleanString(req.header('user-agent') ?? '', 300) ?? null;
 
+  const visitorId = cleanString(req.body?.visitorId, 64) ?? null;
   db.prepare(
-    `INSERT INTO events (session_id, event_type, payload, path, referrer, user_agent, viewport)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(sessionId, eventType, payload, path_, referrer, userAgent, viewport);
+    `INSERT INTO events (session_id, event_type, payload, path, referrer, user_agent, viewport, visitor_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(sessionId, eventType, payload, path_, referrer, userAgent, viewport, visitorId);
   res.status(204).end();
 });
 
@@ -312,14 +314,21 @@ function getFunnel() {
      GROUP BY name`
   ).all() as NamedCount[];
 
-  // Session duration: last event minus first event, for sessions with more than one event
-  // (a single page_view and nothing else has no "duration" worth counting).
+  // How long a VISIT lasted - last event minus first, per session, for sessions with more
+  // than one event. Two things keep this honest, and both had to be fixed: the session id
+  // now covers one visit rather than the browser's whole history, and the client ends a
+  // session after a couple of idle minutes, so a tab left open all night cannot report a
+  // nine-hour session. Anything still longer than this ceiling is a measurement failure
+  // rather than a player, and is left out instead of dragging the average up with it.
+  const SESSION_CEILING_SEC = 4 * 60 * 60;
   const duration = db.prepare(
-    `SELECT AVG(d) as avgSec, MAX(d) as maxSec FROM (
+    `SELECT AVG(d) as avgSec, MAX(d) as maxSec, COUNT(*) as sessions FROM (
        SELECT (julianday(MAX(created_at)) - julianday(MIN(created_at))) * 86400 as d
-       FROM events GROUP BY session_id HAVING COUNT(*) >= 2
-     )`
-  ).get() as { avgSec: number | null; maxSec: number | null };
+       FROM events
+       WHERE visitor_id IS NOT NULL
+       GROUP BY session_id HAVING COUNT(*) >= 2
+     ) WHERE d <= ${SESSION_CEILING_SEC}`
+  ).get() as { avgSec: number | null; maxSec: number | null; sessions: number };
 
   const deviceBreakdown = db.prepare(
     `SELECT viewport as name, COUNT(DISTINCT session_id) as n FROM events
@@ -353,6 +362,7 @@ function getFunnel() {
     modes,
     avgSessionSeconds: duration.avgSec,
     maxSessionSeconds: duration.maxSec,
+    measuredSessions: duration.sessions,
     deviceBreakdown,
     recentSessions,
   };
@@ -407,7 +417,9 @@ app.get('/stats/dashboard', (_req, res) => {
 </style></head>
 <body>
   <h1>Zonke - site stats</h1>
-  <div class="sub">GET /api/stats for raw JSON, /api/stats/events for the paginated raw log</div>
+  <div class="sub">GET /api/stats for raw JSON, /api/stats/events for the paginated raw log.
+    A visit ends after a couple of idle minutes, so these are time actually at the screen -
+    only sessions carrying a visitor id (recorded since this was fixed) are counted.</div>
 
   <h2>Funnel</h2>
   <div class="funnel-row">
@@ -429,8 +441,8 @@ app.get('/stats/dashboard', (_req, res) => {
   <div class="stat-grid" style="margin-top:20px">
     <div class="stat-box"><div class="n">${f.droppedBeforeStarting}</div><div class="l">visited, never played</div></div>
     <div class="stat-box"><div class="n">${f.droppedMidGame}</div><div class="l">started, never finished</div></div>
-    <div class="stat-box"><div class="n">${fmtSeconds(f.avgSessionSeconds)}</div><div class="l">avg time on site</div></div>
-    <div class="stat-box"><div class="n">${fmtSeconds(f.maxSessionSeconds)}</div><div class="l">longest session</div></div>
+    <div class="stat-box"><div class="n">${fmtSeconds(f.avgSessionSeconds)}</div><div class="l">avg visit (${f.measuredSessions} measured)</div></div>
+    <div class="stat-box"><div class="n">${fmtSeconds(f.maxSessionSeconds)}</div><div class="l">longest visit</div></div>
   </div>
 
   <h2>By mode</h2>

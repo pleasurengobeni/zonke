@@ -85,6 +85,17 @@ db.exec(`
     ON events(json_extract(payload, '$.name'), event_type);
 `);
 
+// A visitor is a browser over all time; a session is one visit. These used to be the same
+// id, which made every "session" as long as that browser's entire history - an average
+// measured in days. Old rows keep a NULL visitor_id: their session_id was really a visitor
+// id, and pretending otherwise would bake the same mistake into the new column.
+const eventColumns = db.prepare('PRAGMA table_info(events)').all() as { name: string }[];
+if (!eventColumns.some((c) => c.name === 'visitor_id')) {
+  db.exec('ALTER TABLE events ADD COLUMN visitor_id TEXT');
+}
+
+db.exec('CREATE INDEX IF NOT EXISTS idx_events_visitor ON events(visitor_id)');
+
 // Finished online matches, so a player has a record other players can look at before
 // deciding whether to challenge them. Names are not accounts - two people who pick the
 // same name share a record - but the waiting room is small and public, and a made-up

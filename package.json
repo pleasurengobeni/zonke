@@ -16,7 +16,8 @@
     "test:name": "node scripts/check-name.mjs",
     "test:leaderboard": "node scripts/check-leaderboard.mjs",
     "test:rep": "node scripts/check-rep.mjs",
-    "test:telemetry": "node scripts/check-telemetry.mjs"
+    "test:telemetry": "node scripts/check-telemetry.mjs",
+    "test:session": "node scripts/check-session.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.169.0",

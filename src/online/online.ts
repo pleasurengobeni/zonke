@@ -62,6 +62,15 @@ export class OnlineGame {
     });
   }
 
+  /** An expired session leaves the room, so nobody is left waiting on someone who left. */
+  private handleExpiry = (): void => {
+    if (!this.connected) return;
+    this.net.leaveMatch();
+    this.net.close();
+    this.connected = false;
+    this.ui.setStatus('Session ended - you left the room.');
+  };
+
   /** Opens the waiting room. Being in here IS being available to be challenged. */
   async open(): Promise<void> {
     // Opening twice would leave a ghost of this player sitting in the room on the first
@@ -76,6 +85,7 @@ export class OnlineGame {
     if (this.game.scene.getScene('ZonkeScene')?.scene.isActive()) this.game.scene.stop('ZonkeScene');
     this.connected = true;
     track('online_lobby_joined');
+    window.addEventListener('zonke:session-expired', this.handleExpiry);
     this.ui.show();
     this.ui.setStatus('Connecting...');
     this.net.connect(this.name);

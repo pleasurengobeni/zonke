@@ -65,6 +65,11 @@ const SPLIT_COLOR = '#00e676';
 const LEADERBOARD_CATEGORIES = ['Easy', 'Moderate', 'Hard', 'Challenge', 'Time Attack'] as const;
 type LeaderboardCategory = (typeof LEADERBOARD_CATEGORIES)[number];
 const SPLIT_COLOR_HEX = 0x00e676;
+const PENALTY_COLOR = '#ff1744';
+const PENALTY_COLOR_HEX = 0xff1744;
+
+/** How many moves the opponent loses when somebody lands on the red row. */
+const PENALTY_MOVES = 2;
 
 // The split row's payout: landing on it bursts the ball into this many new ones, each with
 // its own random speed and heading, and every one of them scores where it stops.
@@ -341,6 +346,14 @@ export class ZonkeScene extends Phaser.Scene {
   // A third flashing row, green, and the only one that is usually not there at all: a ball
   // that comes to rest on it bursts into 2-5 balls, each flying off at its own random
   // speed, and every one of them scores where it lands.
+  // The red row reaches across the board: landing on it plays your own move as normal and
+  // knocks two off whatever the opponent has built on that row - their bullet first, then
+  // their figure.
+  private penaltyRow: number | null = null;
+  private penaltyTurnsLeft = 0;
+  private penaltyHighlight!: Phaser.GameObjects.Rectangle;
+  private penaltyLabel!: Phaser.GameObjects.Text;
+
   private splitRow: number | null = null;
   private splitExpiresAt = 0;
   // One green row per match, full stop - once this is set, no further roll can open another.
@@ -445,6 +458,24 @@ export class ZonkeScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setVisible(false);
     this.ensureLifeline();
+
+    this.penaltyHighlight = this.add
+      .rectangle(0, 0, ROWS.length * CELL_W, ROW_H, PENALTY_COLOR_HEX, 1)
+      .setOrigin(0.5)
+      .setVisible(false);
+    this.tweens.add({
+      targets: this.penaltyHighlight,
+      alpha: { from: 0.1, to: 0.42 },
+      duration: 380, // a quicker pulse than the others - this one is a warning
+      yoyo: true,
+      repeat: -1,
+    });
+    this.penaltyLabel = this.add
+      .text(0, 0, `-${PENALTY_MOVES}`, { fontSize: fs(24), color: PENALTY_COLOR, fontStyle: 'bold' })
+      .setOrigin(0.5)
+      .setDepth(1)
+      .setVisible(false);
+    this.pickPenaltyRow();
 
     this.splitHighlight = this.add
       .rectangle(0, 0, ROWS.length * CELL_W, ROW_H, SPLIT_COLOR_HEX, 1)
@@ -705,7 +736,7 @@ export class ZonkeScene extends Phaser.Scene {
       .text(
         CENTER_X,
         0,
-        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind; and once a game, if you are lucky, a green row opens for 15 seconds - land on that one and your ball splits into 2-5, each with its own speed, and every one of them scores.',
+        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind; a red row takes two moves off your opponent; and once a game, if you are lucky, a green row opens for 15 seconds - land on that one and your ball splits into 2-5, each with its own speed, and every one of them scores.',
         { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S, wordWrap: { width: textW } }
       )
       .setOrigin(0.5, 0);
@@ -1438,6 +1469,8 @@ export class ZonkeScene extends Phaser.Scene {
       this.bonusTurnsLeft -= 1;
       if (this.bonusTurnsLeft <= 0) this.pickBonusRow();
     }
+    this.penaltyTurnsLeft -= 1;
+    if (this.penaltyTurnsLeft <= 0) this.pickPenaltyRow();
 
     this.activeIndex = 1 - activeIndexAtLaunch;
     this.turnText.setText(`${this.players[this.activeIndex].name}'s turn`);
@@ -1450,6 +1483,67 @@ export class ZonkeScene extends Phaser.Scene {
     this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
   }
 
+  /** Moves the red row somewhere new. It is never on top of one of the other three. */
+  private pickPenaltyRow(): void {
+    let next: number;
+    do {
+      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
+    } while (
+      MAX_VISIBLE_ROWS > 1 &&
+      (next === this.penaltyRow || next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
+    );
+    this.penaltyRow = next;
+    this.penaltyTurnsLeft = Phaser.Math.Between(4, 8);
+    const x = GRID_LEFT + (ROWS.length * CELL_W) / 2;
+    const y = LOG_TOP + next * ROW_H + ROW_H / 2;
+    this.penaltyHighlight.setPosition(x, y).setVisible(true);
+    // Centred, like the SPLIT label - out of the left-hand columns where the bullet
+    // dashes start, and out of the strip the layout check samples for stray lines.
+    this.penaltyLabel.setPosition(x, y).setVisible(true);
+  }
+
+  /**
+   * Takes moves off the opponent on one row: their bullet steps first, because that is the
+   * progress that was nearly a kill, and only then the parts of their figure. Returns how
+   * many were actually taken - a row where they have built nothing loses nothing.
+   */
+  private applyPenalty(row: number, playerIndex: 0 | 1): number {
+    const victim = 1 - playerIndex;
+    let remaining = PENALTY_MOVES;
+    while (remaining > 0 && this.rowBullets[row][victim] > 0) {
+      this.rowBullets[row][victim] -= 1;
+      remaining -= 1;
+    }
+    while (remaining > 0 && this.rowFigureParts[row][victim] > 0) {
+      this.rowFigureParts[row][victim] -= 1;
+      remaining -= 1;
+    }
+    return PENALTY_MOVES - remaining;
+  }
+
+  /** The red row flaring as it takes the opponent's moves away. */
+  private flashPenaltyRow(slot: number): void {
+    const flash = this.add
+      .rectangle(
+        GRID_LEFT + (ROWS.length * CELL_W) / 2,
+        LOG_TOP + slot * ROW_H + ROW_H / 2,
+        ROWS.length * CELL_W,
+        ROW_H,
+        PENALTY_COLOR_HEX,
+        0.9
+      )
+      .setOrigin(0.5)
+      .setDepth(2);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 200,
+      yoyo: true,
+      repeat: 2,
+      onComplete: () => flash.destroy(),
+    });
+  }
+
   /** Moves the flashing bonus row somewhere new and resets its countdown. */
   private pickBonusRow(): void {
     let next = this.bonusRow;
@@ -1457,7 +1551,7 @@ export class ZonkeScene extends Phaser.Scene {
       next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
     } while (
       MAX_VISIBLE_ROWS > 1 &&
-      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
+      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow || next === this.penaltyRow)
     );
     this.bonusRow = next;
     this.bonusTurnsLeft = Phaser.Math.Between(3, 6);
@@ -1490,7 +1584,7 @@ export class ZonkeScene extends Phaser.Scene {
       next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
     } while (
       MAX_VISIBLE_ROWS > 1 &&
-      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
+      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow || next === this.penaltyRow)
     );
     this.lifelineRow = next;
     // "Reasonable double or triple" - random each time, and always shown as a number rather
@@ -1524,7 +1618,10 @@ export class ZonkeScene extends Phaser.Scene {
     let next: number;
     do {
       next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (MAX_VISIBLE_ROWS > 1 && (next === this.bonusRow || next === this.lifelineRow));
+    } while (
+      MAX_VISIBLE_ROWS > 1 &&
+      (next === this.bonusRow || next === this.lifelineRow || next === this.penaltyRow)
+    );
     this.splitRow = next;
     this.splitSeenThisGame = true;
     this.splitExpiresAt = this.time.now + SPLIT_WINDOW_MS;
@@ -1598,6 +1695,7 @@ export class ZonkeScene extends Phaser.Scene {
     let last: TurnOutcome | null = null;
     let bonusHit = false;
     let lifelineMultiplierHit = 0;
+    let penaltyTaken = 0;
 
     live.forEach((row) => {
       // The bonus row is its own small jackpot, separate from ZONKE - landing on it
@@ -1614,6 +1712,11 @@ export class ZonkeScene extends Phaser.Scene {
           times = this.lifelineMultiplier;
           lifelineMultiplierHit = this.lifelineMultiplier;
         }
+      }
+      // The red row reaches across: your own move plays out as normal, and the opponent
+      // loses two of theirs on this row.
+      if (result !== 'ZONKE' && row === this.penaltyRow) {
+        penaltyTaken += this.applyPenalty(row, playerIndex);
       }
       for (let i = 0; i < times; i++) {
         if (opponent.deadRows[row] || active.deadRows[row]) break;
@@ -1639,16 +1742,28 @@ export class ZonkeScene extends Phaser.Scene {
 
     // The bonus is consumed the moment someone actually lands on it, rather than waiting
     // out its normal countdown - claiming it is what makes a new one appear.
+    if (result !== 'ZONKE' && slot === this.penaltyRow) {
+      this.flashPenaltyRow(slot);
+      this.pickPenaltyRow();
+    }
     if (bonusHit) this.pickBonusRow();
     this.bonusJustHit = bonusHit;
     // Consumed on use, same as the regular bonus - ensureLifeline() (called after this, in
     // resolveLaunch) re-picks it only if whoever used it is still behind afterwards.
     if (lifelineMultiplierHit > 0) this.lifelineRow = null;
-    const prefix = bonusHit
-      ? '2x row! '
-      : lifelineMultiplierHit > 0
-        ? `${lifelineMultiplierHit}x LIFELINE! `
-        : '';
+    const penaltyNote =
+      penaltyTaken > 0
+        ? `-${penaltyTaken} to ${opponent.name}! `
+        : result !== 'ZONKE' && slot === this.penaltyRow
+          ? `Red row, but ${opponent.name} had nothing to lose there. `
+          : '';
+    const prefix =
+      penaltyNote +
+      (bonusHit
+        ? '2x row! '
+        : lifelineMultiplierHit > 0
+          ? `${lifelineMultiplierHit}x LIFELINE! `
+          : '');
 
     if (last) {
       const fired = last as TurnOutcome;
@@ -1681,6 +1796,7 @@ export class ZonkeScene extends Phaser.Scene {
     const human = this.players[0];
     const cpu = this.players[1];
     const playerWon = winner === human;
+    const winnerIndex: 0 | 1 = playerWon ? 0 : 1;
     const durationMs = Math.round(this.matchDurationMs());
     const maxW = CANVAS_W * 0.92;
 
@@ -1692,6 +1808,7 @@ export class ZonkeScene extends Phaser.Scene {
       .setInteractive();
 
     this.launchConfetti(DEPTH + 1, playerWon);
+    this.marchVictors(DEPTH + 4, winnerIndex);
 
     const title = this.add
       .text(CENTER_X, 0, `${winner.name.toUpperCase()} WINS!`, {
@@ -1880,6 +1997,75 @@ export class ZonkeScene extends Phaser.Scene {
           ].join('\n')
         : 'No wins saved yet - be the first!'
     );
+  }
+
+  /**
+   * The winner's figures marching across the screen, left to right.
+   *
+   * They are the same figures the board draws, redrawn each frame with their legs swinging
+   * and a bob in the step - the board's own character taking a victory lap rather than a
+   * new sprite that looks like something else. The whole parade runs in one Graphics
+   * object, since a stick figure is a handful of lines and this is a celebration, not a
+   * simulation.
+   */
+  private marchVictors(depth: number, winnerIndex: 0 | 1): void {
+    const gfx = this.add.graphics().setDepth(depth);
+    const scale = Math.max(FIGURE_SCALE * 1.5, 1.6);
+    const y = CANVAS_H * 0.78;
+    const count = 5;
+    const spacing = Math.max(CANVAS_W / (count + 1), 64 * S);
+    const speed = CANVAS_W / 5200; // px per ms - across the screen in about five seconds
+    const start = -spacing;
+
+    const marchers = Array.from({ length: count }, (_m, i) => ({
+      x: start - i * spacing,
+      phase: i * 0.7,
+    }));
+
+    const event = this.time.addEvent({
+      delay: 16,
+      loop: true,
+      callback: () => {
+        gfx.clear();
+        const t = this.time.now;
+        marchers.forEach((marcher) => {
+          marcher.x += speed * 16;
+          // Straight back to the left once they walk off, so the parade never runs out.
+          if (marcher.x > CANVAS_W + spacing) marcher.x = start;
+          const swing = Math.sin(t / 110 + marcher.phase);
+          const bob = Math.abs(Math.cos(t / 110 + marcher.phase)) * 3 * scale;
+          this.drawMarcher(gfx, marcher.x, y - bob, scale, winnerIndex, swing);
+        });
+      },
+    });
+    this.events.once('shutdown', () => event.remove());
+  }
+
+  /** One marcher: the board's figure, with its legs and free arm swinging as it walks. */
+  private drawMarcher(
+    gfx: Phaser.GameObjects.Graphics,
+    x: number,
+    y: number,
+    v: number,
+    side: 0 | 1,
+    swing: number
+  ): void {
+    const colour = side === 0 ? P1_COLOR_HEX : P2_COLOR_HEX;
+    // Everyone marches to the right, so the figure faces that way whoever won.
+    const m = v;
+    gfx.lineStyle(Math.max(2, 2.6 * v), colour, 1);
+    gfx.fillStyle(colour, 1);
+    gfx.fillRoundedRect(x - 2.6 * v, y - 7 * v, 5.2 * v, 15 * v, 1.6 * v);
+    gfx.fillCircle(x, y - 13 * v, 5.2 * v);
+    // Arms: one swinging opposite the legs, one holding the pistol up in salute.
+    gfx.lineBetween(x - 1.6 * v, y - 5 * v, x - 9 * m - swing * 3 * v, y + 4 * v);
+    gfx.lineBetween(x + 1.6 * v, y - 5 * v, x + 9 * m, y - 12 * v);
+    gfx.lineBetween(x - 1.6 * v, y + 8 * v, x - 8 * m + swing * 6 * v, y + 19 * v);
+    gfx.lineBetween(x + 1.6 * v, y + 8 * v, x + 8 * m - swing * 6 * v, y + 19 * v);
+    // The pistol, raised.
+    gfx.fillStyle(0xe4e4e4, 1);
+    gfx.fillRect(x + 9 * m - 1.5 * v, y - 12 * v - 11 * v, 3.2 * v, 11 * v);
+    gfx.fillStyle(colour, 1);
   }
 
   /** Paper falling over the win screen. Muted when it was the CPU that won. */
