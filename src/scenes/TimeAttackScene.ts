@@ -59,7 +59,9 @@ function computeLayout(width: number, height: number): void {
   ROW_H = 88 * S;
   LOG_TOP = HEADER_TOP + HEADER_H;
   TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
-  APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2;
+  // A charge of nothing rests just inside the BOTTOM of row 1 rather than at its centre,
+  // so row 1 gets a full row of the charge range like every other row - see ZonkeScene.
+  APEX_FLOOR_Y = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H + ROW_H * 0.1;
   APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5 * S);
   BALL_R = Math.min(12 * S, CELL_W * 0.4);
   FRICTION = 0.3 * S;

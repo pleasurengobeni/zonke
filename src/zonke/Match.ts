@@ -38,7 +38,10 @@ const BALL_R = 12 / DESIGN_ROW_H;
 const WALL_BOUNCE = 0.85;
 const BOUNCE_SPREAD = 0.15; // radians either side, off the wall above ZONKE
 const POWER_MAX = 1.55; // 1.0 reaches the ZONKE band; past that is the wall
-const APEX_FLOOR = 9.5; // where a power of 0 comes to rest: the centre of row 1
+// Where a charge of nothing comes to rest: just inside the BOTTOM of row 1, not its
+// centre. With the floor at the centre, only half of row 1 was reachable at all - half a
+// row's worth of charge out of ten - which made landing there feel impossible.
+const APEX_FLOOR = BOARD_ROWS + 0.1;
 const APEX_SPAN = APEX_FLOOR + 5 / DESIGN_ROW_H; // travel from there to just inside the band
 export const LAUNCH_Y = (956.8 + 42 - 147.2) / DESIGN_ROW_H; // the launcher, below the grid
 const STEP_MS = 1000 / 60;

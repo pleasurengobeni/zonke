@@ -68,8 +68,17 @@ const SPLIT_COLOR_HEX = 0x00e676;
 const PENALTY_COLOR = '#ff1744';
 const PENALTY_COLOR_HEX = 0xff1744;
 
-/** How many moves the opponent loses when somebody lands on the red row. */
-const PENALTY_MOVES = 2;
+// The red row is an event, not a fixture. It is rolled for like the green one, can open
+// at most twice in a match, and a second one has to be earned: four more kills have to be
+// scored between them. What it takes off the opponent is 1-3 moves, decided when it opens
+// and shown on the row, so nobody is guessing at what is at stake.
+const PENALTY_SPAWN_CHANCE = 0.02; // rolled per turn while none is open and one is allowed
+const PENALTY_MAX_PER_MATCH = 2;
+const PENALTY_KILLS_BETWEEN = 4;
+const PENALTY_MIN_MOVES = 1;
+const PENALTY_MAX_MOVES = 3;
+const PENALTY_MIN_TURNS = 3; // how long an unclaimed one stays open
+const PENALTY_MAX_TURNS = 6;
 
 // The split row's payout: landing on it bursts the ball into this many new ones, each with
 // its own random speed and heading, and every one of them scores where it stops.
@@ -183,7 +192,11 @@ function computeLayout(width: number, height: number): void {
   SUB_H = ROW_H / 2;
   LOG_TOP = HEADER_TOP + HEADER_H;
   TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
-  APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2;
+  // A charge of nothing rests just inside the BOTTOM of row 1, not at its centre. With
+  // the floor at the centre, only the top half of row 1 was reachable at all - half a
+  // row's worth of charge out of ten - which is why landing there felt impossible. Now row
+  // 1 has a full row of the charge range, like every other row.
+  APEX_FLOOR_Y = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H + ROW_H * 0.1;
   APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5 * S);
 
   // A ball sized for a big desktop board would swallow a phone's narrow columns, so it is
@@ -351,6 +364,11 @@ export class ZonkeScene extends Phaser.Scene {
   // their figure.
   private penaltyRow: number | null = null;
   private penaltyTurnsLeft = 0;
+  private penaltyMoves = PENALTY_MIN_MOVES;
+  private penaltyUsed = 0;
+  /** Total kills on the board when the last red row closed - the gate on the next one. */
+  private killsAtLastPenalty = 0;
+  private penaltyJustClaimed = false;
   private penaltyHighlight!: Phaser.GameObjects.Rectangle;
   private penaltyLabel!: Phaser.GameObjects.Text;
 
@@ -471,11 +489,14 @@ export class ZonkeScene extends Phaser.Scene {
       repeat: -1,
     });
     this.penaltyLabel = this.add
-      .text(0, 0, `-${PENALTY_MOVES}`, { fontSize: fs(24), color: PENALTY_COLOR, fontStyle: 'bold' })
+      .text(0, 0, '', { fontSize: fs(24), color: PENALTY_COLOR, fontStyle: 'bold' })
       .setOrigin(0.5)
       .setDepth(1)
       .setVisible(false);
-    this.pickPenaltyRow();
+    // Nothing on the board to begin with - it has to be rolled for.
+    this.penaltyRow = null;
+    this.penaltyUsed = 0;
+    this.killsAtLastPenalty = 0;
 
     this.splitHighlight = this.add
       .rectangle(0, 0, ROWS.length * CELL_W, ROW_H, SPLIT_COLOR_HEX, 1)
@@ -736,7 +757,7 @@ export class ZonkeScene extends Phaser.Scene {
       .text(
         CENTER_X,
         0,
-        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind; a red row takes two moves off your opponent; and once a game, if you are lucky, a green row opens for 15 seconds - land on that one and your ball splits into 2-5, each with its own speed, and every one of them scores.',
+        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind. A red row opens now and then, worth 1-3 of the moves your opponent has built on it - twice a match at most, and the second only after four more kills. And once a game, if you are lucky, a green row opens for 15 seconds: land on that one and your ball splits into 2-5, every one of which scores.',
         { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S, wordWrap: { width: textW } }
       )
       .setOrigin(0.5, 0);
@@ -1469,8 +1490,8 @@ export class ZonkeScene extends Phaser.Scene {
       this.bonusTurnsLeft -= 1;
       if (this.bonusTurnsLeft <= 0) this.pickBonusRow();
     }
-    this.penaltyTurnsLeft -= 1;
-    if (this.penaltyTurnsLeft <= 0) this.pickPenaltyRow();
+    this.tickPenaltyRow(this.penaltyJustClaimed);
+    this.penaltyJustClaimed = false;
 
     this.activeIndex = 1 - activeIndexAtLaunch;
     this.turnText.setText(`${this.players[this.activeIndex].name}'s turn`);
@@ -1483,23 +1504,64 @@ export class ZonkeScene extends Phaser.Scene {
     this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
   }
 
-  /** Moves the red row somewhere new. It is never on top of one of the other three. */
-  private pickPenaltyRow(): void {
+  private get totalKills(): number {
+    return this.players[0].kills + this.players[1].kills;
+  }
+
+  /**
+   * One turn of the red row's life. It is not a fixture: it has to be rolled for, it
+   * closes again after a few turns if nobody reaches it, only two can open in a match, and
+   * the second has to be earned - four more kills have to be scored after the first one is
+   * done with. Plenty of matches will see one, some two, some none.
+   */
+  private tickPenaltyRow(claimed: boolean): void {
+    if (claimed) {
+      this.closePenaltyRow();
+      return;
+    }
+    if (this.penaltyRow !== null) {
+      this.penaltyTurnsLeft -= 1;
+      if (this.penaltyTurnsLeft <= 0) this.closePenaltyRow();
+      return;
+    }
+    if (this.penaltyUsed >= PENALTY_MAX_PER_MATCH) return;
+    if (this.penaltyUsed > 0 && this.totalKills < this.killsAtLastPenalty + PENALTY_KILLS_BETWEEN) return;
+    if (Math.random() >= PENALTY_SPAWN_CHANCE) return;
+    this.openPenaltyRow();
+  }
+
+  /** A red row opens, clear of the other three, worth 1-3 of the opponent's moves. */
+  private openPenaltyRow(): void {
     let next: number;
     do {
       next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
     } while (
       MAX_VISIBLE_ROWS > 1 &&
-      (next === this.penaltyRow || next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
+      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
     );
     this.penaltyRow = next;
-    this.penaltyTurnsLeft = Phaser.Math.Between(4, 8);
+    this.penaltyMoves = Phaser.Math.Between(PENALTY_MIN_MOVES, PENALTY_MAX_MOVES);
+    this.penaltyTurnsLeft = Phaser.Math.Between(PENALTY_MIN_TURNS, PENALTY_MAX_TURNS);
     const x = GRID_LEFT + (ROWS.length * CELL_W) / 2;
     const y = LOG_TOP + next * ROW_H + ROW_H / 2;
     this.penaltyHighlight.setPosition(x, y).setVisible(true);
     // Centred, like the SPLIT label - out of the left-hand columns where the bullet
     // dashes start, and out of the strip the layout check samples for stray lines.
-    this.penaltyLabel.setPosition(x, y).setVisible(true);
+    this.penaltyLabel.setText(`-${this.penaltyMoves}`).setPosition(x, y).setVisible(true);
+    this.messageText.setText(
+      `${this.messageText.text}  A RED ROW opened on row ${rowLabel(next)} - land on it to take ${this.penaltyMoves} move(s) off your opponent!`
+    );
+    track('penalty_row_opened', { row: rowLabel(next), moves: this.penaltyMoves, mode: this.mode?.name });
+  }
+
+  private closePenaltyRow(): void {
+    if (this.penaltyRow === null) return;
+    this.penaltyRow = null;
+    this.penaltyTurnsLeft = 0;
+    this.penaltyUsed += 1;
+    this.killsAtLastPenalty = this.totalKills;
+    this.penaltyHighlight.setVisible(false);
+    this.penaltyLabel.setVisible(false);
   }
 
   /**
@@ -1509,7 +1571,8 @@ export class ZonkeScene extends Phaser.Scene {
    */
   private applyPenalty(row: number, playerIndex: 0 | 1): number {
     const victim = 1 - playerIndex;
-    let remaining = PENALTY_MOVES;
+    const cost = this.penaltyMoves;
+    let remaining = cost;
     while (remaining > 0 && this.rowBullets[row][victim] > 0) {
       this.rowBullets[row][victim] -= 1;
       remaining -= 1;
@@ -1518,7 +1581,7 @@ export class ZonkeScene extends Phaser.Scene {
       this.rowFigureParts[row][victim] -= 1;
       remaining -= 1;
     }
-    return PENALTY_MOVES - remaining;
+    return cost - remaining;
   }
 
   /** The red row flaring as it takes the opponent's moves away. */
@@ -1742,9 +1805,10 @@ export class ZonkeScene extends Phaser.Scene {
 
     // The bonus is consumed the moment someone actually lands on it, rather than waiting
     // out its normal countdown - claiming it is what makes a new one appear.
-    if (result !== 'ZONKE' && slot === this.penaltyRow) {
+    const penaltyClaimed = result !== 'ZONKE' && slot === this.penaltyRow;
+    if (penaltyClaimed) {
       this.flashPenaltyRow(slot);
-      this.pickPenaltyRow();
+      this.penaltyJustClaimed = true;
     }
     if (bonusHit) this.pickBonusRow();
     this.bonusJustHit = bonusHit;
