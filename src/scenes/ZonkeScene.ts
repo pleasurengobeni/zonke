@@ -1446,6 +1446,8 @@ export class ZonkeScene extends Phaser.Scene {
     // Kills may have just changed, so re-check who (if anyone) is behind and needs a
     // lifeline - appears the moment someone pulls ahead, gone once it's even again.
     this.ensureLifeline();
+    // A row may have just been taken - nothing should be left flashing on it.
+    this.clearSpecialsFromDeadRows();
     // Open, count down, or roll for a new one - see tickSplitRow for why it is this rare.
     this.tickSplitRow(didSplit);
 
@@ -1504,6 +1506,46 @@ export class ZonkeScene extends Phaser.Scene {
     this.rowFigureParts = Array.from({ length: MAX_VISIBLE_ROWS }, () => [0, 0]);
   }
 
+  /**
+   * A row that has been taken is out of play for both sides, so nothing should be flashing
+   * on it: there is no figure left to build there and no bullet left to advance, and a
+   * special row sitting on one is an invitation to waste a shot.
+   */
+  private isRowDead(row: number): boolean {
+    return this.players[0].deadRows[row] || this.players[1].deadRows[row];
+  }
+
+  /**
+   * Rows a special highlight may legitimately sit on: still in play, and not already
+   * spoken for by another special row.
+   *
+   * A list, rather than picking at random until one is acceptable. When every row is down
+   * - which happens in sudden death, and at the end of every match - rejection sampling
+   * never terminates, and an earlier version of this hung the game outright.
+   */
+  private availableRows(...taken: (number | null)[]): number[] {
+    const rows: number[] = [];
+    for (let row = 0; row < MAX_VISIBLE_ROWS; row++) {
+      if (this.isRowDead(row)) continue;
+      if (taken.includes(row)) continue;
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  /** Moves any special row that has ended up on a row that is now down. */
+  private clearSpecialsFromDeadRows(): void {
+    if (this.bonusRow !== null && this.isRowDead(this.bonusRow)) this.pickBonusRow();
+    if (this.lifelineRow !== null && this.isRowDead(this.lifelineRow)) {
+      this.lifelineRow = null;
+      this.lifelineHighlight.setVisible(false);
+      this.lifelineLabel.setVisible(false);
+      this.ensureLifeline();
+    }
+    if (this.splitRow !== null && this.isRowDead(this.splitRow)) this.closeSplitRow();
+    if (this.penaltyRow !== null && this.isRowDead(this.penaltyRow)) this.closePenaltyRow();
+  }
+
   private get totalKills(): number {
     return this.players[0].kills + this.players[1].kills;
   }
@@ -1532,13 +1574,9 @@ export class ZonkeScene extends Phaser.Scene {
 
   /** A red row opens, clear of the other three, worth 1-3 of the opponent's moves. */
   private openPenaltyRow(): void {
-    let next: number;
-    do {
-      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (
-      MAX_VISIBLE_ROWS > 1 &&
-      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
-    );
+    const rows = this.availableRows(this.bonusRow, this.lifelineRow, this.splitRow);
+    if (rows.length === 0) return; // nothing in play to open it on; the roll comes again
+    const next = rows[Phaser.Math.Between(0, rows.length - 1)];
     this.penaltyRow = next;
     this.penaltyMoves = Phaser.Math.Between(PENALTY_MIN_MOVES, PENALTY_MAX_MOVES);
     this.penaltyTurnsLeft = Phaser.Math.Between(PENALTY_MIN_TURNS, PENALTY_MAX_TURNS);
@@ -1609,19 +1647,19 @@ export class ZonkeScene extends Phaser.Scene {
 
   /** Moves the flashing bonus row somewhere new and resets its countdown. */
   private pickBonusRow(): void {
-    let next = this.bonusRow;
-    do {
-      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (
-      MAX_VISIBLE_ROWS > 1 &&
-      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow || next === this.penaltyRow)
-    );
-    this.bonusRow = next;
+    const rows = this.availableRows(this.bonusRow, this.lifelineRow, this.splitRow, this.penaltyRow);
+    if (rows.length === 0) {
+      // Nothing left in play to put it on - better no gold row than one on a dead row.
+      this.bonusRow = null;
+      this.bonusHighlight.setVisible(false);
+      this.bonusTurnsLeft = 1;
+      return;
+    }
+    this.bonusRow = rows[Phaser.Math.Between(0, rows.length - 1)];
     this.bonusTurnsLeft = Phaser.Math.Between(3, 6);
-    this.bonusHighlight.setPosition(
-      GRID_LEFT + (ROWS.length * CELL_W) / 2,
-      LOG_TOP + this.bonusRow * ROW_H + ROW_H / 2
-    );
+    this.bonusHighlight
+      .setVisible(true)
+      .setPosition(GRID_LEFT + (ROWS.length * CELL_W) / 2, LOG_TOP + this.bonusRow * ROW_H + ROW_H / 2);
   }
 
   /**
@@ -1642,13 +1680,14 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   private pickLifelineRow(): void {
-    let next: number;
-    do {
-      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (
-      MAX_VISIBLE_ROWS > 1 &&
-      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow || next === this.penaltyRow)
-    );
+    const rows = this.availableRows(this.bonusRow, this.lifelineRow, this.splitRow, this.penaltyRow);
+    if (rows.length === 0) {
+      this.lifelineRow = null;
+      this.lifelineHighlight.setVisible(false);
+      this.lifelineLabel.setVisible(false);
+      return;
+    }
+    const next = rows[Phaser.Math.Between(0, rows.length - 1)];
     this.lifelineRow = next;
     // "Reasonable double or triple" - random each time, and always shown as a number rather
     // than left for the player to guess at.
@@ -1678,13 +1717,9 @@ export class ZonkeScene extends Phaser.Scene {
 
   /** The one green row of the match opens, clear of the other two, for fifteen seconds. */
   private openSplitRow(): void {
-    let next: number;
-    do {
-      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (
-      MAX_VISIBLE_ROWS > 1 &&
-      (next === this.bonusRow || next === this.lifelineRow || next === this.penaltyRow)
-    );
+    const rows = this.availableRows(this.bonusRow, this.lifelineRow, this.penaltyRow);
+    if (rows.length === 0) return; // nothing in play to open it on; the roll comes again
+    const next = rows[Phaser.Math.Between(0, rows.length - 1)];
     this.splitRow = next;
     this.splitSeenThisGame = true;
     this.splitExpiresAt = this.time.now + SPLIT_WINDOW_MS;
@@ -1939,54 +1974,55 @@ export class ZonkeScene extends Phaser.Scene {
       .setOrigin(0.5, 0)
       .setDepth(DEPTH + 2);
 
-    let saving = false;
-    let saved = false;
-    const setButtonLabel = (btn: { text: Phaser.GameObjects.Text }, label: string): void => {
-      btn.text.setFontSize(Math.max(1, Math.round(23 * S)));
-      btn.text.setText(label);
-      fitLabel(btn.text, btnW - 20 * S);
-    };
+    // A win saves itself. Being asked to press a button to keep a result you just earned
+    // is a strange thing to do to someone; a loss still saves nothing, because the board
+    // it would go on is a board of wins.
+    const savedNote = this.add
+      .text(CENTER_X, 0, playerWon ? 'Saving your run...' : '', {
+        fontSize: fs(19),
+        color: '#7fc98a',
+        align: 'center',
+        wordWrap: { width: maxW },
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(DEPTH + 2);
 
-    // Only a win can be saved. The board is a fastest-WINS board, so a loss has nothing
-    // to go on it, and offering the button anyway invited people to file their defeats.
-    const save = playerWon
-      ? makeButton(`Save my score - ${human.kills} kills in ${formatClock(durationMs)}`, 0x4caf50, () => void onSave())
-      : null;
-
-    const onSave = async (): Promise<void> => {
-      if (!save || saving || saved) return;
-      saving = true;
-      setButtonLabel(save, 'Saving...');
-      const ok = await submitScore({
+    if (playerWon) {
+      void submitScore({
         name: human.name,
         score: human.kills,
-        // The API's floor is one second; a match can't realistically be shorter, but a
+        // The API's floor is one second; a match cannot realistically be shorter, but a
         // rejected submission over a rounding edge would be a silly way to lose a run.
         durationMs: Math.max(1000, durationMs),
         mode: 'zonke',
-        won: playerWon,
-        // Which board this belongs on - an Easy win and a Hard win are not comparable.
+        won: true,
+        // Which board it belongs on - an Easy win and a Hard win are not comparable.
         difficulty: this.mode?.name,
+      }).then((result) => {
+        if (!savedNote.scene) return;
+        if (!result.saved) {
+          savedNote.setText('Could not save this run - the leaderboard is out of reach.');
+          savedNote.setColor('#ff8a65');
+          return;
+        }
+        track('score_saved', { mode: this.mode?.name, kills: human.kills, durationMs, auto: true });
+        if (result.globalBest) {
+          savedNote.setText(`NEW RECORD - the fastest ${this.mode?.name ?? ''} win yet!`);
+          savedNote.setColor('#ffd54f');
+        } else if (result.personalBest) {
+          savedNote.setText(`Saved - your best ${this.mode?.name ?? ''} win yet!`);
+          savedNote.setColor('#ffd54f');
+        } else {
+          savedNote.setText('Saved to the leaderboard.');
+        }
+        void this.fillFastestBoard(board);
       });
-      saving = false;
-      // A restart while the request was in flight destroys these objects - Phaser clears
-      // .scene on destroy, which is the cheapest way to ask "is this still on screen?".
-      if (!save.text.scene || !board.scene) return;
-      if (!ok) {
-        setButtonLabel(save, 'Save failed - tap to try again');
-        return;
-      }
-      saved = true;
-      setButtonLabel(save, 'Score saved');
-      track('score_saved', { mode: this.mode?.name, kills: human.kills, durationMs });
-      await this.fillFastestBoard(board);
-    };
+    } else {
+      void this.fillFastestBoard(board);
+    }
 
     const play = makeButton('Play again', 0xffd54f, () => this.restartGame());
-    const buttons = save ? [save, play] : [play];
-
-    // A loss still gets to see the times to beat - it just has nothing to add to them.
-    if (!playerWon) void this.fillFastestBoard(board);
+    const buttons = [play];
 
     // Laid out as a measured top-down stack, the same way the difficulty picker is, so
     // nothing overlaps once wrapping and font-fitting have had their say.
@@ -2000,7 +2036,9 @@ export class ZonkeScene extends Phaser.Scene {
       subtitle.setY(cy);
       cy += subtitle.height + gap * 0.5;
       stats.setY(cy);
-      cy += stats.height + gap;
+      cy += stats.height + gap * 0.5;
+      savedNote.setY(cy);
+      cy += savedNote.height + gap;
       buttons.forEach(({ rect, text }) => {
         rect.setY(cy + btnH / 2);
         text.setY(cy + btnH / 2);
@@ -2016,7 +2054,7 @@ export class ZonkeScene extends Phaser.Scene {
     let contentH = stack();
     if (contentH > CANVAS_H * 0.94) {
       const shrink = Phaser.Math.Clamp((CANVAS_H * 0.94) / contentH, 0.5, 1);
-      [title, subtitle, stats, board, ...buttons.map((b) => b.text)].forEach((t) =>
+      [title, subtitle, stats, savedNote, board, ...buttons.map((b) => b.text)].forEach((t) =>
         t.setFontSize(Math.max(9, Math.round(parseInt(t.style.fontSize as string, 10) * shrink)))
       );
       btnH *= shrink;
@@ -2027,7 +2065,7 @@ export class ZonkeScene extends Phaser.Scene {
     }
 
     const startY = Math.max(8 * S, (CANVAS_H - contentH) / 2);
-    [title, subtitle, stats, board].forEach((t) => t.setY(t.y + startY));
+    [title, subtitle, stats, savedNote, board].forEach((t) => t.setY(t.y + startY));
     buttons.forEach(({ rect, text }) => {
       rect.setY(rect.y + startY);
       text.setY(text.y + startY);

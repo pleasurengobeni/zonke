@@ -59,7 +59,7 @@ for (const [label, width, height] of [['desktop', 1000, 900], ['phone', 390, 844
 const page = await browser.newPage({ viewport: { width, height } });
 console.log(`  --- ${label} ${width}x${height}`);
 page.on('pageerror', (e) => fail(`page error: ${e}`));
-await page.goto(BASE, { waitUntil: 'networkidle' });
+await page.goto(BASE, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(400);
 if (await page.$('#name-gate')) {
   await page.fill('#name-gate .ng-input', 'Looker');

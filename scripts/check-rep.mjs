@@ -89,7 +89,7 @@ const browser = await chromium.launch();
 const watcher = await browser.newContext({ viewport: { width: 900, height: 860 } });
 const page = await watcher.newPage();
 page.on('pageerror', (e) => fail(`page error: ${e}`));
-await page.goto(`${BASE}?online=1`, { waitUntil: 'networkidle' });
+await page.goto(`${BASE}?online=1`, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(300);
 if (await page.$('#name-gate')) {
   await page.fill('#name-gate .ng-input', 'Looker');

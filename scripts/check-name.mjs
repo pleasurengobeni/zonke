@@ -21,7 +21,7 @@ const boardName = (page) =>
 {
   const context = await browser.newContext({ viewport: { width: 1000, height: 820 } });
   const page = await context.newPage();
-  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#name-gate', { timeout: 5000 }).catch(() => fail('a first-time visitor was not asked for a name'));
   const button = await page.textContent('#name-gate .ng-btn');
   if (button !== 'Play') fail(`first visit button reads "${button}"`);
@@ -39,7 +39,7 @@ const boardName = (page) =>
 {
   const context = await browser.newContext({ viewport: { width: 1000, height: 820 }, storageState: STATE });
   const page = await context.newPage();
-  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(900);
   const gate = await page.$('#name-gate');
   if (gate) fail('a returning player was asked for their name again');
@@ -55,7 +55,7 @@ const boardName = (page) =>
 {
   const context = await browser.newContext({ viewport: { width: 1000, height: 820 }, storageState: STATE });
   const page = await context.newPage();
-  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(800);
 
   const link = await page.evaluate(() => {
@@ -107,7 +107,7 @@ const boardName = (page) =>
 {
   const context = await browser.newContext({ viewport: { width: 1000, height: 820 }, storageState: STATE });
   const page = await context.newPage();
-  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(800);
   if (await page.$('#name-gate')) fail('asked again after changing the name');
   await page.keyboard.press('1');
@@ -122,7 +122,7 @@ const boardName = (page) =>
 {
   const context = await browser.newContext({ viewport: { width: 1000, height: 820 } });
   const page = await context.newPage();
-  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   const asked = await page.waitForSelector('#name-gate', { timeout: 5000 }).then(() => true).catch(() => false);
   console.log(`  a fresh browser is asked: ${asked}`);
   if (!asked) fail('a browser with no stored name was not asked for one');
@@ -133,7 +133,7 @@ const boardName = (page) =>
 {
   const watcher = await browser.newContext({ viewport: { width: 900, height: 820 } });
   const watcherPage = await watcher.newPage();
-  await watcherPage.goto(`${BASE}?online=1`, { waitUntil: 'networkidle' });
+  await watcherPage.goto(`${BASE}?online=1`, { waitUntil: 'domcontentloaded' });
   await watcherPage.waitForTimeout(300);
   if (await watcherPage.$('#name-gate')) {
     await watcherPage.fill('#name-gate .ng-input', 'Watcher');
@@ -143,7 +143,7 @@ const boardName = (page) =>
 
   const context = await browser.newContext({ viewport: { width: 900, height: 820 }, storageState: STATE });
   const page = await context.newPage();
-  await page.goto(`${BASE}?online=1`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}?online=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.lobby-card');
   await watcherPage.waitForFunction(() => /Kulani/.test(document.querySelector('.lobby-card')?.textContent ?? ''), { timeout: 5000 })
     .catch(() => fail('the other player never appeared in the room'));

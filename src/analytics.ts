@@ -174,17 +174,26 @@ export interface ScoreSubmission {
   difficulty?: Difficulty | string;
 }
 
-export async function submitScore(entry: ScoreSubmission): Promise<boolean> {
+/** What the server made of a saved run - whether it beat anything. */
+export interface SaveResult {
+  saved: boolean;
+  personalBest: boolean;
+  globalBest: boolean;
+}
+
+export async function submitScore(entry: ScoreSubmission): Promise<SaveResult> {
   try {
     const res = await fetch('/api/scores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: 'timeattack', won: false, ...entry }),
     });
-    return res.ok;
+    if (!res.ok) return { saved: false, personalBest: false, globalBest: false };
+    const body = (await res.json()) as { personalBest?: boolean; globalBest?: boolean };
+    return { saved: true, personalBest: Boolean(body.personalBest), globalBest: Boolean(body.globalBest) };
   } catch {
     // best-effort - a failed submission shouldn't block showing the player their score
-    return false;
+    return { saved: false, personalBest: false, globalBest: false };
   }
 }
 

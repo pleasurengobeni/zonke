@@ -18,7 +18,7 @@ async function join(name) {
   const page = await browser.newPage({ viewport: { width: 900, height: 800 } });
   page.on('pageerror', (e) => fail(`${name} page error: ${e}`));
   page.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test(m.text())) fail(`${name} console: ${m.text()}`); });
-  await page.goto(`${BASE}?online=1`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}?online=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(400);
   if (await page.$('#name-gate')) {
     await page.fill('#name-gate .ng-input', name);

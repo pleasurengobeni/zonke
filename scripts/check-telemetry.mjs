@@ -19,7 +19,7 @@ page.on('pageerror', (e) => fail(`page error: ${e}`));
 let requests = 0;
 page.on('request', (r) => { if (/\/api\/events/.test(r.url())) requests += 1; });
 
-await page.goto(BASE, { waitUntil: 'networkidle' });
+await page.goto(BASE, { waitUntil: 'domcontentloaded' });
 await page.waitForTimeout(400);
 if (await page.$('#name-gate')) {
   await page.fill('#name-gate .ng-input', PLAYER);

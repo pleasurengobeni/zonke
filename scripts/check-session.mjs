@@ -18,7 +18,7 @@ const browser = await chromium.launch();
 {
   const context = await browser.newContext({ viewport: { width: 900, height: 800 } });
   const page = await context.newPage();
-  await page.goto(BASE, { waitUntil: 'networkidle' });
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(400);
   if (await page.$('#name-gate')) {
     await page.fill('#name-gate .ng-input', 'Sessions');
@@ -34,7 +34,7 @@ const browser = await chromium.launch();
   if (first.visitor === first.session) fail('the visitor id and the session id are the same value');
 
   // A reload is the same visit.
-  await page.reload({ waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(600);
   const reloaded = await page.evaluate(() => ({
     visitor: localStorage.getItem('zonke.visitorId'),
@@ -52,7 +52,7 @@ const browser = await chromium.launch();
     storageState: { cookies: [], origins: state.origins.map((o) => ({ ...o, localStorage: o.localStorage })) },
   });
   const page2 = await later.newPage();
-  await page2.goto(BASE, { waitUntil: 'networkidle' });
+  await page2.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page2.waitForTimeout(700);
   const second = await page2.evaluate(() => ({
     visitor: localStorage.getItem('zonke.visitorId'),
@@ -71,7 +71,7 @@ const browser = await chromium.launch();
   const page = await context.newPage();
   page.on('pageerror', (e) => fail(`page error: ${e}`));
   // Two seconds idle, four seconds to answer - the real values are minutes.
-  await page.goto(`${BASE}?idleMs=2000&graceMs=12000`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}?idleMs=2000&graceMs=12000`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(400);
   if (await page.$('#name-gate')) {
     await page.fill('#name-gate .ng-input', 'Idler');
@@ -130,7 +130,7 @@ const browser = await chromium.launch();
 {
   const context = await browser.newContext({ viewport: { width: 900, height: 800 } });
   const page = await context.newPage();
-  await page.goto(`${BASE}?idleMs=2000&graceMs=20000`, { waitUntil: 'networkidle' });
+  await page.goto(`${BASE}?idleMs=2000&graceMs=20000`, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(400);
   if (await page.$('#name-gate')) {
     await page.fill('#name-gate .ng-input', 'Stayer');

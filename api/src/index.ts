@@ -85,10 +85,34 @@ app.post('/scores', rateLimit, (req, res) => {
     res.status(400).json({ error: 'Unknown difficulty' });
     return;
   }
+  // Whether this run beat anything is worked out here, while the numbers are in hand, so
+  // the game can say "your best yet" or "the fastest ever" without another round trip and
+  // without a client deciding for itself what counts as a record.
+  const better = (row: { best: number | null } | undefined, value: number, lowerIsBetter: boolean): boolean => {
+    if (!row || row.best === null) return true;
+    return lowerIsBetter ? value < row.best : value > row.best;
+  };
+  const lowerIsBetter = mode === 'zonke'; // a Zonke run is judged on time, Time Attack on points
+  const value = lowerIsBetter ? durationMs : score;
+  const column = lowerIsBetter ? 'MIN(duration_ms)' : 'MAX(score)';
+  const scope = lowerIsBetter ? "mode = 'zonke' AND won = 1" : "mode = 'timeattack'";
+  const difficultyClause = difficulty ? ' AND difficulty = ?' : ' AND difficulty IS NULL';
+  const difficultyParams = difficulty ? [difficulty] : [];
+
+  const previousMine = db
+    .prepare(`SELECT ${column} as best FROM scores WHERE ${scope}${difficultyClause} AND name = ? COLLATE NOCASE`)
+    .get(...difficultyParams, name) as { best: number | null } | undefined;
+  const previousAny = db
+    .prepare(`SELECT ${column} as best FROM scores WHERE ${scope}${difficultyClause}`)
+    .get(...difficultyParams) as { best: number | null } | undefined;
+
+  const personalBest = won === 1 || mode === 'timeattack' ? better(previousMine, value, lowerIsBetter) : false;
+  const globalBest = won === 1 || mode === 'timeattack' ? better(previousAny, value, lowerIsBetter) : false;
+
   const info = db
     .prepare('INSERT INTO scores (name, score, duration_ms, mode, won, difficulty) VALUES (?, ?, ?, ?, ?, ?)')
     .run(name, score, durationMs, mode, won, difficulty);
-  res.status(201).json({ id: info.lastInsertRowid });
+  res.status(201).json({ id: info.lastInsertRowid, personalBest, globalBest });
 });
 
 app.get('/scores/top', (req, res) => {

@@ -366,23 +366,17 @@ export class TimeAttackScene extends Phaser.Scene {
     const name = await ensurePlayerName();
     const durationMs = Math.round(this.time.now - this.roundStartAt);
 
-    // Nothing is submitted until the player says so. This used to save itself the moment
-    // the round ended, which put runs on the board that nobody chose to put there.
-    const btnW = Math.min(panelW * 0.82, 420 * S);
-    const btnH = 44 * S;
-    const saveBtn = this.add
-      .rectangle(CENTER_X, midY - 74 * S, btnW, btnH, 0x2e7d46, 0.9)
-      .setOrigin(0.5, 0)
-      .setDepth(2)
-      .setInteractive({ useHandCursor: true });
-    const saveLabel = this.add
-      .text(CENTER_X, midY - 74 * S + btnH / 2, `Save my score (${this.score})`, {
-        fontSize: fs(17),
-        color: '#ffffff',
-        fontStyle: 'bold',
+    // A finished round saves itself. This used to be a button, because the round used to
+    // save on ANY ending including ones the player had no part in; now the only thing it
+    // ever saves is a completed round, so asking first is just an extra tap.
+    const savedNote = this.add
+      .text(CENTER_X, midY - 78 * S, 'Saving your run...', {
+        fontSize: fs(16),
+        color: '#7fc98a',
+        align: 'center',
       })
-      .setOrigin(0.5)
-      .setDepth(3);
+      .setOrigin(0.5, 0)
+      .setDepth(2);
 
     const listText = this.add
       .text(CENTER_X, midY - 16 * S, 'Loading leaderboard...', {
@@ -393,6 +387,25 @@ export class TimeAttackScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 0)
       .setDepth(2);
+
+    void submitScore({ name, score: this.score, durationMs, mode: 'timeattack' }).then((result) => {
+      if (!savedNote.scene) return;
+      if (!result.saved) {
+        savedNote.setText("Couldn't save this run");
+        savedNote.setColor('#ff8a65');
+        return;
+      }
+      if (result.globalBest) {
+        savedNote.setText(`NEW RECORD - the highest Time Attack score yet, ${this.score}!`);
+        savedNote.setColor('#ffd54f');
+      } else if (result.personalBest) {
+        savedNote.setText(`Saved as ${name} - your best yet!`);
+        savedNote.setColor('#ffd54f');
+      } else {
+        savedNote.setText(`Saved as ${name}`);
+      }
+      void showBoard();
+    });
 
     const showBoard = async (): Promise<void> => {
       const top = await fetchTopScores(10, 'timeattack');
@@ -406,24 +419,8 @@ export class TimeAttackScene extends Phaser.Scene {
     };
     void showBoard();
 
-    let saving = false;
-    saveBtn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
-      event.stopPropagation();
-      if (saving) return;
-      saving = true;
-      saveLabel.setText('Saving...');
-      void submitScore({ name, score: this.score, durationMs, mode: 'timeattack' }).then((ok) => {
-        if (!saveLabel.scene) return;
-        if (!ok) {
-          saveLabel.setText('Save failed - tap to try again');
-          saving = false;
-          return;
-        }
-        saveLabel.setText(`Saved as ${name}`);
-        saveBtn.disableInteractive();
-        void showBoard();
-      });
-    });
+    const btnW = Math.min(panelW * 0.82, 420 * S);
+    const btnH = 44 * S;
 
     // An explicit button, not a tap anywhere: a stray tap next to Save must not throw the
     // round away before it has been saved.

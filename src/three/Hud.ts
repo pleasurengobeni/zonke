@@ -200,11 +200,12 @@ export async function saveZonkeScore(
   durationMs: number,
   won: boolean
 ): Promise<boolean> {
-  return submitScore({
+  const result = await submitScore({
     name,
     score: kills,
     durationMs: Math.max(1000, Math.round(durationMs)),
     mode: 'zonke',
     won,
   });
+  return result.saved;
 }

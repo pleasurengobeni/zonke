@@ -28,7 +28,7 @@ for (const [label, w, h] of sizes) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.goto(URL, { waitUntil: 'domcontentloaded' });
 
   // 1. The name gate should be up, before anything else.
   const gate = await page.$('#name-gate');
@@ -375,46 +375,40 @@ for (const [label, w, h] of sizes) {
   else console.log(`  headline "${big.text}" ${Math.round(big.right - big.left)}px wide`);
   if (!win.some((t) => /Kills  4 - 2/.test(t.text))) fail('kills missing from win screen');
   if (!win.some((t) => /Time  4:1\d/.test(t.text))) fail('match time missing from win screen');
-  if (!win.some((t) => /Save my score - 4 kills/.test(t.text))) fail('save button missing');
+  // A win saves itself now; there is no button to find, only a note saying what happened.
+  if (win.some((t) => /Save my score/.test(t.text))) fail('the win screen still asks the player to save');
   for (const t of win) {
     if (t.left < -1 || t.right > t.w + 1 || t.top < -1 || t.bottom > t.h + 1) {
       fail(`"${t.text}" outside the canvas (${Math.round(t.left)}..${Math.round(t.right)} of ${t.w})`);
     }
   }
 
-  // 6. Save the score for real, then read the leaderboard back out of the API.
-  await page.evaluate(() => {
-    const s = window.zonkeGame.scene.getScene('ZonkeScene');
-    const btn = s.children.list.find((o) => o.type === 'Rectangle' && o.depth === 22 && o.input);
-    btn.emit('pointerdown', {}, 0, 0, { stopPropagation() {} });
-  });
-  await page.waitForTimeout(1500);
+  // 6. The run saves itself, and the board follows - no tap involved.
+  await page.waitForTimeout(2500);
   await page.screenshot({ path: `${OUT}/${label}-5-saved.png` });
   const after = await page.evaluate(() => {
     const s = window.zonkeGame.scene.getScene('ZonkeScene');
     return s.children.list.filter((o) => o.type === 'Text' && o.depth >= 20).map((t) => t.text);
   });
-  if (!after.some((t) => t.includes('Score saved'))) fail(`score not saved: ${JSON.stringify(after)}`);
+  const note = after.find((t) => /^(NEW RECORD|Saved -|Saved to|Could not save)/.test(t));
+  console.log(`  it says: "${note}"`);
+  if (!note) fail(`the win screen never reported the save: ${JSON.stringify(after.slice(-3))}`);
+  if (/Could not save/.test(note ?? '')) fail('the run failed to save');
+
   const board = after.find((t) => t.includes('Fastest wins'));
-  if (!board) fail(`fastest-wins board did not load after saving: ${JSON.stringify(after.slice(-3))}`);
+  if (!board) fail(`the fastest-wins board did not load: ${JSON.stringify(after.slice(-3))}`);
   else {
-    console.log('  leaderboard: ' + board.replace(/\n/g, ' | '));
-    // Whether this particular run makes the top ten depends on what else is in the
-    // database, so that is not the thing to assert - that it was SAVED, with the right
-    // difficulty, is. The board itself only has to be a sorted list of distinct players.
-    // Asserted through the player's own record rather than the board: whether a 4:11 run
-    // makes the top of an Easy board depends on what else is in the database, and that is
-    // not what is being tested here.
-    const rep = await (await fetch('http://127.0.0.1:4000/players/rep?name=Ntsako')).json();
-    const easy = (rep.cpu.byDifficulty ?? []).find((d) => d.difficulty === 'Easy');
-    if (!easy || easy.wins < 1) fail(`the win was not recorded against Easy: ${JSON.stringify(rep.cpu)}`);
-    else console.log(`  recorded: ${easy.wins} Easy win(s), fastest ${Math.round(easy.fastestMs / 1000)}s`);
+    console.log('  leaderboard: ' + board.split('\n').slice(0, 3).join(' | '));
     const names = board.split('\n').slice(1).map((l) => l.replace(/^\d+\. /, '').split('  -  ')[0]);
     if (new Set(names).size !== names.length) fail(`a player appears twice on the board: ${names.join(', ')}`);
-    // Times must climb down the list - that is the whole ordering.
     const times = [...board.matchAll(/(\d+):(\d\d)/g)].map((m) => Number(m[1]) * 60 + Number(m[2]));
-    if (times.some((t, i) => i > 0 && t < times[i - 1])) fail(`fastest-wins list is not sorted: ${times}`);
+    if (times.some((t, i) => i > 0 && t < times[i - 1])) fail(`the board is not sorted: ${times}`);
   }
+
+  const rep = await (await fetch('http://127.0.0.1:4000/players/rep?name=Ntsako')).json();
+  const easy = (rep.cpu.byDifficulty ?? []).find((d) => d.difficulty === 'Easy');
+  if (!easy || easy.wins < 1) fail(`the win was not recorded against Easy: ${JSON.stringify(rep.cpu)}`);
+  else console.log(`  recorded: ${easy.wins} Easy win(s), fastest ${Math.round(easy.fastestMs / 1000)}s`);
 
   if (errors.length) fail('console errors: ' + errors.join(' | '));
   await page.close();
@@ -428,7 +422,7 @@ for (const [label, w, h] of sizes) {
 {
   console.log('\n=== green row scarcity');
   const page = await browser.newPage({ viewport: { width: 1366, height: 768 } });
-  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.goto(URL, { waitUntil: 'domcontentloaded' });
   await page.fill('#name-gate .ng-input', 'Rate');
   await page.click('#name-gate .ng-btn');
   await page.waitForTimeout(300);
@@ -509,7 +503,7 @@ for (const [label, w, h] of sizes) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto(URL, { waitUntil: 'networkidle' });
+  await page.goto(URL, { waitUntil: 'domcontentloaded' });
   await page.fill('#name-gate .ng-input', 'Thandi');
   await page.click('#name-gate .ng-btn');
   await page.waitForTimeout(300);
@@ -609,8 +603,10 @@ for (const [label, w, h] of sizes) {
   if (ta.prompted) fail('Time Attack asked for a name again');
   // The round must NOT have saved itself - it offers a button instead. Whether that button
   // works is check-saves.mjs's job; here it only has to be on screen and unpressed.
-  if (ta.texts.some((t) => /Saved as/.test(t))) fail('the round saved itself without being asked');
-  if (!ta.texts.some((t) => /Save my score/.test(t))) fail('no save button on the Time Attack results');
+  // Time Attack saves itself too - what has to be true is that it says so, and that it
+  // never asks. check-saves.mjs is where the submission itself is pinned down.
+  if (ta.texts.some((t) => /Save my score/.test(t))) fail('Time Attack still asks the player to save');
+  if (!ta.texts.some((t) => /Saved as|NEW RECORD|Couldn/.test(t))) fail('Time Attack does not report the save');
   if (!ta.texts.some((t) => /1\. \w+ - \d+/.test(t))) fail('no leaderboard on the Time Attack results');
 
   if (errors.length) fail('console errors: ' + errors.join(' | '));

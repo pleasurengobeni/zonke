@@ -518,6 +518,8 @@ export class Match {
       : '';
     this.listener.onMessage?.(`${headline}${lastMessage}`);
     this.ensureLifeline();
+    // A row may have just been taken - nothing should be left flashing on it.
+    this.clearSpecialsFromDeadRows();
     this.tickSplitRow(didSplit);
     this.tickPenaltyRow(this.penaltyJustClaimed);
     this.penaltyJustClaimed = false;
@@ -648,11 +650,15 @@ export class Match {
   // ---- the three special rows -----------------------------------------------------
 
   private pickBonusRow(): void {
-    let next = this.bonusRow;
-    do {
-      next = this.between(0, BOARD_ROWS - 1);
-    } while (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow);
-    this.bonusRow = next;
+    const rows = this.availableRows(this.bonusRow, this.lifelineRow, this.splitRow, this.penaltyRow);
+    if (rows.length === 0) {
+      // Nothing left in play to put it on - better no gold row than one on a dead row.
+      this.bonusRow = null;
+      this.bonusTurnsLeft = 1;
+      this.listener.onSpecialRowsChanged?.();
+      return;
+    }
+    this.bonusRow = rows[this.between(0, rows.length - 1)];
     this.bonusTurnsLeft = this.between(3, 6);
     this.listener.onSpecialRowsChanged?.();
   }
@@ -665,10 +671,13 @@ export class Match {
       return;
     }
     if (this.lifelineRow !== null) return;
-    let next: number;
-    do {
-      next = this.between(0, BOARD_ROWS - 1);
-    } while (next === this.bonusRow || next === this.splitRow);
+    const rows = this.availableRows(this.bonusRow, this.splitRow, this.penaltyRow);
+    if (rows.length === 0) {
+      this.lifelineRow = null;
+      this.listener.onSpecialRowsChanged?.();
+      return;
+    }
+    const next = rows[this.between(0, rows.length - 1)];
     this.lifelineRow = next;
     this.lifelineMultiplier = this.between(2, 3);
     this.listener.onSpecialRowsChanged?.();
@@ -676,6 +685,37 @@ export class Match {
 
   private isTrailing(playerIndex: 0 | 1): boolean {
     return this.players[playerIndex].kills < this.players[1 - playerIndex].kills;
+  }
+
+  /** A row that has been taken is out of play for both sides - nothing flashes on it. */
+  private isRowDead(row: number): boolean {
+    return this.players[0].deadRows[row] || this.players[1].deadRows[row];
+  }
+
+  /**
+   * Rows a special highlight may legitimately sit on. A list rather than picking at random
+   * until one is acceptable: when every row is down - sudden death, or the end of a match
+   * - rejection sampling never terminates and hangs the game.
+   */
+  private availableRows(...taken: (number | null)[]): number[] {
+    const rows: number[] = [];
+    for (let row = 0; row < BOARD_ROWS; row++) {
+      if (this.isRowDead(row)) continue;
+      if (taken.includes(row)) continue;
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  /** Moves any special row that has ended up on a row that is now down. */
+  private clearSpecialsFromDeadRows(): void {
+    if (this.bonusRow !== null && this.isRowDead(this.bonusRow)) this.pickBonusRow();
+    if (this.lifelineRow !== null && this.isRowDead(this.lifelineRow)) {
+      this.lifelineRow = null;
+      this.ensureLifeline();
+    }
+    if (this.splitRow !== null && this.isRowDead(this.splitRow)) this.closeSplitRow();
+    if (this.penaltyRow !== null && this.isRowDead(this.penaltyRow)) this.closePenaltyRow();
   }
 
   private get totalKills(): number {
@@ -716,10 +756,9 @@ export class Match {
     if (this.penaltyUsed > 0 && this.totalKills < this.killsAtLastPenalty + PENALTY_KILLS_BETWEEN) return;
     if (this.rng() >= PENALTY_SPAWN_CHANCE) return;
 
-    let next: number;
-    do {
-      next = this.between(0, BOARD_ROWS - 1);
-    } while (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow);
+    const penaltyRows = this.availableRows(this.bonusRow, this.lifelineRow, this.splitRow);
+    if (penaltyRows.length === 0) return; // nothing in play to open it on
+    const next = penaltyRows[this.between(0, penaltyRows.length - 1)];
     this.penaltyRow = next;
     this.penaltyMoves = this.between(PENALTY_MIN_MOVES, PENALTY_MAX_MOVES);
     this.penaltyTurnsLeft = this.between(PENALTY_MIN_TURNS, PENALTY_MAX_TURNS);
@@ -759,10 +798,9 @@ export class Match {
     if (this.splitSeenThisGame) return;
     if (this.rng() >= SPLIT_SPAWN_CHANCE) return;
 
-    let next: number;
-    do {
-      next = this.between(0, BOARD_ROWS - 1);
-    } while (next === this.bonusRow || next === this.lifelineRow);
+    const splitRows = this.availableRows(this.bonusRow, this.lifelineRow, this.penaltyRow);
+    if (splitRows.length === 0) return; // nothing in play to open it on
+    const next = splitRows[this.between(0, splitRows.length - 1)];
     this.splitRow = next;
     this.splitSeenThisGame = true;
     this.splitExpiresAt = this.elapsedMs + SPLIT_WINDOW_MS;

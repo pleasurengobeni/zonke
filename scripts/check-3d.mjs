@@ -22,7 +22,7 @@ async function openGame(url, w, h) {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-  await page.goto(url, { waitUntil: 'networkidle' });
+  await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(500);
   if (await page.$('#name-gate')) {
     await page.fill('#name-gate .ng-input', 'Ntsako');
