@@ -32,28 +32,63 @@ function boundedInt(v: unknown, min: number, max: number): number | null {
 
 // ---- scores -----------------------------------------------------------------------
 
-app.post('/scores', rateLimit, (req, res) => {
-  const name = cleanString(req.body?.name, 24);
+const SCORE_MODES = ['timeattack', 'zonke'] as const;
+type ScoreMode = (typeof SCORE_MODES)[number];
+
+function scoreMode(v: unknown): ScoreMode | null {
+  if (v === undefined || v === null) return 'timeattack'; // what the only pre-mode client sent
+  return SCORE_MODES.includes(v as ScoreMode) ? (v as ScoreMode) : null;
+}
+
+// Time Attack is a fixed 60s round; a Zonke match runs until someone can't be caught, which
+// is open-ended, so the two modes get different sanity ceilings rather than one that is
+// either too tight for a long match or too loose to mean anything.
+const MODE_LIMITS: Record<ScoreMode, { maxScore: number; maxDurationMs: number }> = {
   // 5000 is a generous ceiling above any realistic Time Attack round (20-point ZONKE
   // landings every couple of seconds for the whole round would not reach it) - it exists
   // to reject obviously forged submissions, not to model the real scoring curve exactly.
-  const score = boundedInt(req.body?.score, 0, 5000);
-  const durationMs = boundedInt(req.body?.durationMs, 1000, 300_000);
-  if (!name || score === null || durationMs === null) {
+  timeattack: { maxScore: 5000, maxDurationMs: 300_000 },
+  // A Zonke score IS the player's kill count, and there are only ten rows to take.
+  zonke: { maxScore: 10, maxDurationMs: 3_600_000 },
+};
+
+app.post('/scores', rateLimit, (req, res) => {
+  const name = cleanString(req.body?.name, 24);
+  const mode = scoreMode(req.body?.mode);
+  if (!name || mode === null) {
+    res.status(400).json({ error: 'Invalid score submission' });
+    return;
+  }
+  const limits = MODE_LIMITS[mode];
+  const score = boundedInt(req.body?.score, 0, limits.maxScore);
+  const durationMs = boundedInt(req.body?.durationMs, 1000, limits.maxDurationMs);
+  if (score === null || durationMs === null) {
     res.status(400).json({ error: 'Invalid score submission' });
     return;
   }
   const info = db
-    .prepare('INSERT INTO scores (name, score, duration_ms) VALUES (?, ?, ?)')
-    .run(name, score, durationMs);
+    .prepare('INSERT INTO scores (name, score, duration_ms, mode) VALUES (?, ?, ?, ?)')
+    .run(name, score, durationMs, mode);
   res.status(201).json({ id: info.lastInsertRowid });
 });
 
 app.get('/scores/top', (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 10));
+  // No mode filter returns every mode together, as this route always did - callers that
+  // care about a single board (both game modes do) ask for one by name.
+  const mode = typeof req.query.mode === 'string' ? scoreMode(req.query.mode) : undefined;
+  if (mode === null) {
+    res.status(400).json({ error: 'Unknown mode' });
+    return;
+  }
+  const where = mode ? 'WHERE mode = ?' : '';
+  const params = mode ? [mode, limit] : [limit];
   const rows = db
-    .prepare('SELECT name, score, duration_ms as durationMs, created_at as createdAt FROM scores ORDER BY score DESC, created_at ASC LIMIT ?')
-    .all(limit);
+    .prepare(
+      `SELECT name, score, duration_ms as durationMs, mode, created_at as createdAt FROM scores
+       ${where} ORDER BY score DESC, duration_ms ASC, created_at ASC LIMIT ?`
+    )
+    .all(...params);
   res.json(rows);
 });
 
@@ -116,7 +151,13 @@ app.get('/stats', (_req, res) => {
     )
     .all();
   const scoreStats = db
-    .prepare('SELECT COUNT(*) as n, AVG(score) as avg, MAX(score) as max FROM scores')
+    .prepare("SELECT COUNT(*) as n, AVG(score) as avg, MAX(score) as max FROM scores WHERE mode = 'timeattack'")
+    .get();
+  const zonkeScoreStats = db
+    .prepare(
+      `SELECT COUNT(*) as n, AVG(score) as avgKills, MAX(score) as maxKills, AVG(duration_ms) as avgDurationMs
+       FROM scores WHERE mode = 'zonke'`
+    )
     .get();
   const last7Days = db
     .prepare(
@@ -134,6 +175,7 @@ app.get('/stats', (_req, res) => {
     modeSelections: modePicks,
     gameOutcomes: outcomes,
     timeAttackScores: scoreStats,
+    zonkeScores: zonkeScoreStats,
     eventsPerDayLast7: last7Days,
   });
 });

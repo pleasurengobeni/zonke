@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test:layout": "node scripts/check-layout.mjs"
+    "test:layout": "node scripts/check-layout.mjs",
+    "test:features": "node scripts/check-features.mjs"
   },
   "devDependencies": {
     "playwright": "^1.63.0",

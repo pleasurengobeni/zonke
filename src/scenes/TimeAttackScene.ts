@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { ROWS } from '../zonke/GameState';
 import { track, submitScore, fetchTopScores, type TopScore } from '../analytics';
+import { ensurePlayerName } from '../player';
 
 // Same tuned physics as the main game (see ZonkeScene.ts for how these were arrived at -
 // friction/bounce/ball-size all scale with S, the same way, for the same reasons). Kept as
@@ -360,13 +361,26 @@ export class TimeAttackScene extends Phaser.Scene {
       .setOrigin(0.5, 0)
       .setDepth(2);
 
-    const name = (window.prompt('New high score run! Enter your name for the leaderboard:', '') ?? '').trim();
-    if (name) {
-      await submitScore(name.slice(0, 24), this.score, Math.round(this.time.now - this.roundStartAt));
-    }
+    // The session already knows who is playing (asked once, before the first game), so a
+    // finished round goes straight onto the board instead of interrupting with a prompt.
+    const name = await ensurePlayerName();
+    const saved = await submitScore(
+      name,
+      this.score,
+      Math.round(this.time.now - this.roundStartAt),
+      'timeattack'
+    );
 
-    const top = await fetchTopScores(10);
+    const top = await fetchTopScores(10, 'timeattack');
+    if (!loading.scene) return; // restarted while the requests were in flight
     loading.destroy();
+    this.add
+      .text(CENTER_X, midY - 92 * S, saved ? `Saved as ${name}` : "Couldn't save your score", {
+        fontSize: fs(15),
+        color: saved ? '#4caf50' : '#ff8a65',
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(2);
     const listText = top.length
       ? top.map((r: TopScore, i: number) => `${i + 1}. ${r.name} - ${r.score}`).join('\n')
       : 'No scores yet - be the first!';

@@ -41,3 +41,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
   CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 `);
+
+// The scores table predates having more than one scoreable mode, so `mode` is added in
+// place rather than by recreating the table - an existing deployment's rows have to
+// survive this. Everything already in there was a Time Attack run, since that was the only
+// mode that could submit a score, which is exactly what the DEFAULT backfills them to.
+const scoreColumns = db.prepare('PRAGMA table_info(scores)').all() as { name: string }[];
+if (!scoreColumns.some((c) => c.name === 'mode')) {
+  db.exec(`ALTER TABLE scores ADD COLUMN mode TEXT NOT NULL DEFAULT 'timeattack'`);
+}
+
+// The leaderboard is always read one mode at a time - a Zonke run scores in kills (single
+// digits) and a Time Attack run in points (tens), so ranking them against each other would
+// be meaningless.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_scores_mode_score ON scores(mode, score DESC)`);

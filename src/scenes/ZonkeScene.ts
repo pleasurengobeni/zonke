@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
-import { track } from '../analytics';
+import { track, submitScore, fetchTopScores } from '../analytics';
+import { ensurePlayerName, storedPlayerName, DEFAULT_NAME } from '../player';
 import {
   ROWS,
   BULLET_STEPS,
@@ -55,6 +56,54 @@ const P1_COLOR_HEX = 0x4caf50;
 const P2_COLOR_HEX = 0x2196f3;
 const KILL_COLOR = '#ff5252';
 const NEUTRAL_COLOR = '#888888';
+const SPLIT_COLOR = '#00e676';
+const SPLIT_COLOR_HEX = 0x00e676;
+
+// The split row's payout: landing on it bursts the ball into this many new ones, each with
+// its own random speed and heading, and every one of them scores where it stops.
+const SPLIT_MIN_BALLS = 2;
+const SPLIT_MAX_BALLS = 5;
+
+// It is a rare event, not a fixture. Most turns there is no green row on the board at all,
+// and plenty of matches finish without one ever opening - that scarcity is the point, and
+// it is what keeps a split feeling like luck rather than another row to farm. At roughly a
+// 1-in-100 roll per turn, gated by a cooldown after each one closes, a typical match sees
+// about one open, and close to half of them see none.
+// At most ONE green row per match, and only if the roll goes that way: it opens for fifteen
+// seconds, and it is gone for the rest of that game the moment it is hit or the clock runs
+// out - whichever comes first.
+// Measured against a ~70-turn match (see scripts/check-features.mjs), a 1-in-100 roll per
+// turn opens one in roughly half of matches - the other half finish without ever seeing it.
+const SPLIT_SPAWN_CHANCE = 0.01; // rolled once per turn, until the one chance is spent
+const SPLIT_WINDOW_MS = 15_000;
+
+/**
+ * One ball in flight. A shot starts as a single ball, but the split row turns it into
+ * several at once, so every bit of physics below works over a list instead of one fixed
+ * set of coordinates.
+ */
+interface FlightBall {
+  gfx: Phaser.GameObjects.Arc;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  resting: boolean;
+  hitWall: boolean;
+  fromSplit: boolean;
+}
+
+/** Where one ball came to rest, waiting to be applied to the board. */
+interface Landing {
+  result: LaunchResult;
+  slot: number;
+  overCharged: boolean;
+}
+
+function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
 
 // The whole board is designed on a 1500x1160 canvas; every position below is expressed as
 // a fraction of that design and re-applied to whatever size Phaser actually hands the scene,
@@ -74,7 +123,11 @@ let CENTER_X = CANVAS_W / 2;
 let CELL_W = 132;
 let GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
 let GRID_RIGHT = GRID_LEFT + ROWS.length * CELL_W;
-let HEADER_TOP = 10;
+// The match clock lives in a band above the board; the board itself is scaled down a
+// notch to pay for that band rather than pushing the bottom chrome off short screens.
+let TOP_BAR_H = 46;
+const BOARD_SHRINK = 0.92;
+let HEADER_TOP = TOP_BAR_H;
 let HEADER_H = 110;
 let ROW_H = 88; // full row height, sized so a figure fits between rows without crowding
 // The figures live out in the margins, one per row per side, lined up with the row centre.
@@ -109,11 +162,12 @@ function computeLayout(width: number, height: number): void {
   GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
   GRID_RIGHT = GRID_LEFT + ROWS.length * CELL_W;
 
-  HEADER_TOP = 10 * S;
-  HEADER_H = 110 * S;
-  ROW_H = 88 * S;
+  TOP_BAR_H = 46 * S;
+  HEADER_TOP = TOP_BAR_H;
+  HEADER_H = 110 * S * BOARD_SHRINK;
+  ROW_H = 88 * S * BOARD_SHRINK;
   FIGURE_X = [GRID_LEFT / 2, (GRID_RIGHT + CANVAS_W) / 2];
-  FIGURE_SCALE = 2.2 * S;
+  FIGURE_SCALE = 2.2 * S * BOARD_SHRINK;
   SUB_H = ROW_H / 2;
   LOG_TOP = HEADER_TOP + HEADER_H;
   TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
@@ -181,19 +235,30 @@ export class ZonkeScene extends Phaser.Scene {
   private messageText!: Phaser.GameObjects.Text;
   private columnHighlight!: Phaser.GameObjects.Rectangle;
   private gameOverText!: Phaser.GameObjects.Text;
+  private nameText!: Phaser.GameObjects.Text;
+  private clockText!: Phaser.GameObjects.Text;
   private ball!: Phaser.GameObjects.Arc;
   private ballRestY = 0;
   private ballX = 0;
   private ballY = 0;
+
+  // Every ball currently on the board - one on a normal shot, up to six after a split.
+  private balls: FlightBall[] = [];
+  // Where those balls came to rest, applied to the board together once they have all stopped.
+  private landings: Landing[] = [];
+  private splitUsedThisTurn = false;
+
+  // The match clock, shown above the board. It starts when a difficulty is picked (not at
+  // page load, which would count the time spent reading the menu) and freezes on the win.
+  private matchStartAt = 0;
+  private matchEndedAt: number | null = null;
+  private pickerShown = false;
 
   private ready = false; // waiting for the player to launch
   private charging = false; // SPACE is held down, power is building
   private chargeStart = 0;
   private power = 0;
   private flying = false; // ball is in the air, outcome not decided yet
-  private ballVx = 0;
-  private ballVy = 0;
-  private hitWall = false; // over-powered: bounced off the wall above ZONKE
   private gameOver = false;
   private mode: Mode | null = null; // null while the difficulty is still being chosen
   private modeUi: Phaser.GameObjects.GameObject[] = [];
@@ -217,6 +282,16 @@ export class ZonkeScene extends Phaser.Scene {
   private lifelineHighlight!: Phaser.GameObjects.Rectangle;
   private lifelineLabel!: Phaser.GameObjects.Text;
 
+  // A third flashing row, green, and the only one that is usually not there at all: a ball
+  // that comes to rest on it bursts into 2-5 balls, each flying off at its own random
+  // speed, and every one of them scores where it lands.
+  private splitRow: number | null = null;
+  private splitExpiresAt = 0;
+  // One green row per match, full stop - once this is set, no further roll can open another.
+  private splitSeenThisGame = false;
+  private splitHighlight!: Phaser.GameObjects.Rectangle;
+  private splitLabel!: Phaser.GameObjects.Text;
+
   constructor() {
     super('ZonkeScene');
   }
@@ -232,19 +307,27 @@ export class ZonkeScene extends Phaser.Scene {
     this.scale.on('resize', this.onScaleResize, this);
     this.events.once('shutdown', () => this.scale.off('resize', this.onScaleResize, this));
 
-    this.players = [createPlayer('Player 1'), createPlayer('CPU')];
+    // The name is asked for once per session (see ensurePlayerName below); until it comes
+    // back the board is built with the placeholder, then relabelled in place.
+    const knownName = storedPlayerName();
+    this.players = [createPlayer(knownName ?? DEFAULT_NAME), createPlayer('CPU')];
     this.activeIndex = 0;
     this.resetBoard();
     this.gameOver = false;
+    this.matchEndedAt = null;
+    this.pickerShown = false;
+    this.balls = [];
+    this.landings = [];
+    this.splitUsedThisTurn = false;
 
     // Each margin label is measured and shrunk (or abbreviated) to actually fit the
     // margin it sits in, rather than trusting that a fraction of screen width is always
     // wide enough - that assumption is what clipped "Player 1" to "layer 1" on a phone.
     const gutter = 6 * S;
-    const nameL = this.add
-      .text(FIGURE_X[0], 6 * S, 'Player 1', { fontSize: fs(30), color: P1_COLOR })
+    this.nameText = this.add
+      .text(FIGURE_X[0], 6 * S, this.players[0].name, { fontSize: fs(30), color: P1_COLOR })
       .setOrigin(0.5, 0);
-    fitLabel(nameL, MARGIN_L - gutter * 2, 'P1');
+    fitLabel(this.nameText, MARGIN_L - gutter * 2, 'P1');
     const nameR = this.add
       .text(FIGURE_X[1], 6 * S, 'CPU', { fontSize: fs(24), color: P2_COLOR })
       .setOrigin(0.5, 0);
@@ -256,6 +339,16 @@ export class ZonkeScene extends Phaser.Scene {
     ];
     fitLabel(this.killTexts[0], MARGIN_L - gutter * 2);
     fitLabel(this.killTexts[1], MARGIN_R - gutter * 2);
+
+    // Sits in the band above the board, centred over the grid so it never runs into the
+    // player names out in the margins.
+    this.clockText = this.add
+      .text(CENTER_X, 8 * S, `Time  ${formatClock(0)}`, {
+        fontSize: fs(26),
+        color: '#e0e0e0',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0);
 
     this.drawHeader();
 
@@ -296,6 +389,27 @@ export class ZonkeScene extends Phaser.Scene {
       .setVisible(false);
     this.ensureLifeline();
 
+    this.splitHighlight = this.add
+      .rectangle(0, 0, ROWS.length * CELL_W, ROW_H, SPLIT_COLOR_HEX, 1)
+      .setOrigin(0.5)
+      .setVisible(false);
+    this.tweens.add({
+      targets: this.splitHighlight,
+      alpha: { from: 0.1, to: 0.32 },
+      duration: 800,
+      yoyo: true,
+      repeat: -1,
+    });
+    this.splitLabel = this.add
+      .text(0, 0, 'SPLIT', { fontSize: fs(20), color: SPLIT_COLOR, fontStyle: 'bold' })
+      .setOrigin(0.5)
+      .setDepth(1)
+      .setVisible(false);
+    // Deliberately nothing to show yet - the board starts with no green row, and this match
+    // may well finish without one.
+    this.splitRow = null;
+    this.splitSeenThisGame = false;
+
     this.createCellPool();
 
     this.ballRestY = TABLE_BOTTOM + 26 * S;
@@ -304,13 +418,17 @@ export class ZonkeScene extends Phaser.Scene {
 
     const turnY = this.ballRestY + 28 * S;
     this.turnText = this.add
-      .text(CENTER_X, turnY, "Player 1's turn", { fontSize: fs(24), color: P1_COLOR })
+      .text(CENTER_X, turnY, `${this.players[0].name}'s turn`, { fontSize: fs(24), color: P1_COLOR })
       .setOrigin(0.5, 0);
 
+    // Wrapped: a split turn's message is a good deal longer than a single landing's, and
+    // an unwrapped line runs straight off both edges of a phone.
     this.messageText = this.add
       .text(CENTER_X, turnY + 32 * S, 'Hold to charge, release to launch', {
         fontSize: fs(21),
         color: '#cccccc',
+        align: 'center',
+        wordWrap: { width: CANVAS_W * 0.92 },
       })
       .setOrigin(0.5, 0);
 
@@ -338,10 +456,10 @@ export class ZonkeScene extends Phaser.Scene {
     // Touch/mouse: press-and-hold anywhere on the board to charge, same as holding SPACE.
     // Tapping while the game is over restarts, so there is no keyboard-only control left.
     this.input.on('pointerdown', () => {
-      if (this.gameOver) {
-        this.restartGame();
-        return;
-      }
+      // No tap-anywhere restart once the game is over: the win screen has its own Save and
+      // Play again buttons, and a stray tap beside Save must not throw the run away before
+      // it has been captured.
+      if (this.gameOver) return;
       this.onChargeStart();
     });
     this.input.on('pointerup', this.onRelease, this);
@@ -350,13 +468,40 @@ export class ZonkeScene extends Phaser.Scene {
     this.redrawAll();
 
     if (this.mode) {
+      // Came back from a restart with a difficulty already chosen - the clock starts again.
+      this.matchStartAt = this.time.now;
       this.armBall();
-    } else {
+    } else if (knownName) {
       this.showModePicker();
+    } else {
+      // First round of the session: the board is already drawn behind the prompt, and the
+      // difficulty picker waits until we know who is playing.
+      this.turnText.setText('');
+      this.messageText.setText('');
+      ensurePlayerName().then((name) => {
+        this.applyPlayerName(name);
+        // A resize (a phone keyboard opening, say) can restart the scene while the prompt
+        // is still open, leaving two callbacks waiting on one shared promise - the guard
+        // keeps the second one from stacking a duplicate picker on top of the first.
+        if (this.mode || this.pickerShown) return;
+        this.showModePicker();
+      });
+    }
+  }
+
+  /** Relabels the human player once the session's name comes back from the prompt. */
+  private applyPlayerName(name: string): void {
+    this.players[0].name = name;
+    this.nameText.setFontSize(Math.max(1, Math.round(30 * S)));
+    this.nameText.setText(name);
+    fitLabel(this.nameText, MARGIN_L - 12 * S, 'P1');
+    if (!this.gameOver && this.mode) {
+      this.turnText.setText(`${this.players[this.activeIndex].name}'s turn`);
     }
   }
 
   private showModePicker(): void {
+    this.pickerShown = true;
     // Built as a top-down stack, each block placed from the ACTUAL measured height of the
     // one before it - not fixed offsets guessed at one screen size. That is what the old
     // version got wrong: a hint line that happened to wrap to two lines on a narrow phone
@@ -415,7 +560,7 @@ export class ZonkeScene extends Phaser.Scene {
       .text(
         CENTER_X,
         0,
-        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind.',
+        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits. A gold row doubles any landing; an orange row is a lifeline - double or triple, but only for whoever is behind; and once a game, if you are lucky, a green row opens for 15 seconds - land on that one and your ball splits into 2-5, each with its own speed, and every one of them scores.',
         { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S, wordWrap: { width: textW } }
       )
       .setOrigin(0.5, 0);
@@ -485,7 +630,8 @@ export class ZonkeScene extends Phaser.Scene {
     track('mode_selected', { mode: this.mode.name });
     this.modeUi.forEach((o) => o.destroy());
     this.modeUi = [];
-    this.turnText.setText("Player 1's turn");
+    this.matchStartAt = this.time.now;
+    this.turnText.setText(`${this.players[0].name}'s turn`);
     this.messageText.setText('Hold to charge, release to launch');
     this.armBall();
   }
@@ -586,10 +732,12 @@ export class ZonkeScene extends Phaser.Scene {
     this.flying = false;
     this.charging = false;
     this.power = 0;
-    this.ballVx = 0;
-    this.ballVy = 0;
-    this.hitWall = false;
+    this.clearSplitBalls();
+    this.balls = [];
+    this.landings = [];
+    this.splitUsedThisTurn = false;
     this.positionBallAtRest();
+    this.ball.setVisible(true);
     this.columnHighlight.setVisible(false);
     if (this.isCpuTurn() && !this.gameOver && this.mode) {
       this.time.delayedCall(500, () => this.takeCpuTurn());
@@ -649,7 +797,6 @@ export class ZonkeScene extends Phaser.Scene {
     this.power = Phaser.Math.Clamp(power, 0, POWER_MAX);
     this.ready = false;
     this.flying = true;
-    this.hitWall = false;
 
     // Power buys distance. Friction then eats exactly that much momentum, so the ball
     // coasts to a stop at the height the gauge promised - it does not fall back.
@@ -657,16 +804,30 @@ export class ZonkeScene extends Phaser.Scene {
     // Stepping in whole frames loses about half a frame of travel, so aim slightly past the
     // target - that keeps the ball stopping exactly where the gauge promised it would.
     const distance = target + Math.sqrt(2 * FRICTION * target) / 2;
-    // Straight up the board - the shot has no sideways component of its own.
-    this.ballVx = 0;
-    this.ballVy = -Math.sqrt(2 * FRICTION * distance);
+    this.landings = [];
+    this.splitUsedThisTurn = false;
+    this.balls = [
+      {
+        gfx: this.ball,
+        x: this.ballX,
+        y: this.ballY,
+        // Straight up the board - the shot has no sideways component of its own.
+        vx: 0,
+        vy: -Math.sqrt(2 * FRICTION * distance),
+        resting: false,
+        hitWall: false,
+        fromSplit: false,
+      },
+    ];
 
     this.columnHighlight.setVisible(true);
     this.columnHighlight.setFillStyle(this.activeIndex === 0 ? P1_COLOR_HEX : P2_COLOR_HEX, 0.15);
   }
 
   update(_time: number, delta: number): void {
+    if (this.mode && !this.gameOver) this.updateClock();
     if (this.gameOver || !this.mode) return;
+    this.updateSplitWindow();
 
     if (this.charging) {
       const held = this.time.now - this.chargeStart;
@@ -681,56 +842,70 @@ export class ZonkeScene extends Phaser.Scene {
     // Integrate in fixed 16ms steps so the same power always travels the same distance.
     const steps = Math.min(4, Math.max(1, Math.round(delta / 16.667)));
     for (let i = 0; i < steps && this.flying; i++) {
-      this.stepBall();
+      // A ball settling on the split row appends its splinters mid-step, so step over a
+      // snapshot: the new balls start moving on the next tick, not halfway through this one.
+      this.balls.slice().forEach((ball) => {
+        if (!ball.resting) this.stepBall(ball);
+      });
     }
 
-    this.ball.setPosition(this.ballX, this.ballY);
+    this.balls.forEach((ball) => ball.gfx.setPosition(ball.x, ball.y));
     this.highlightColumnUnderBall();
   }
 
-  /** One 16ms tick: friction bleeds momentum, walls turn the ball around. */
-  private stepBall(): void {
-    const speed = Math.hypot(this.ballVx, this.ballVy);
+  private updateClock(): void {
+    this.clockText.setText(`Time  ${formatClock(this.matchDurationMs())}`);
+  }
+
+  /** How long this match has been running; frozen at the moment someone won. */
+  private matchDurationMs(): number {
+    if (!this.matchStartAt) return 0;
+    return (this.matchEndedAt ?? this.time.now) - this.matchStartAt;
+  }
+
+  /** One 16ms tick for one ball: friction bleeds momentum, walls turn it around. */
+  private stepBall(ball: FlightBall): void {
+    const speed = Math.hypot(ball.vx, ball.vy);
     const slowed = speed - FRICTION;
     if (speed < STOP_SPEED || slowed <= 0) {
-      this.settle();
+      this.settleBall(ball);
       return;
     }
 
     // Friction acts against the direction of travel, so the ball keeps its heading.
     const scale = slowed / speed;
-    this.ballVx *= scale;
-    this.ballVy *= scale;
-    this.ballX += this.ballVx;
-    this.ballY += this.ballVy;
+    ball.vx *= scale;
+    ball.vy *= scale;
+    ball.x += ball.vx;
+    ball.y += ball.vy;
 
     const left = GRID_LEFT + BALL_R;
     const right = GRID_LEFT + ROWS.length * CELL_W - BALL_R;
-    if (this.ballX < left) {
-      this.ballX = left;
-      this.ballVx = Math.abs(this.ballVx) * WALL_BOUNCE;
-    } else if (this.ballX > right) {
-      this.ballX = right;
-      this.ballVx = -Math.abs(this.ballVx) * WALL_BOUNCE;
+    if (ball.x < left) {
+      ball.x = left;
+      ball.vx = Math.abs(ball.vx) * WALL_BOUNCE;
+    } else if (ball.x > right) {
+      ball.x = right;
+      ball.vx = -Math.abs(ball.vx) * WALL_BOUNCE;
     }
 
     // The wall above ZONKE is the one thing that sends it back. Whatever momentum it still
     // had going up now carries it back down, so the harder you overshot, the lower you land.
     const wall = this.wallY();
-    if (this.ballY < wall) {
-      this.ballY = wall;
+    if (ball.y < wall) {
+      ball.y = wall;
       // Coming off the wall is the only thing that sends the ball sideways: whatever
       // momentum it had left comes back down on a random angle.
-      const speed = Math.hypot(this.ballVx, this.ballVy) * WALL_BOUNCE;
+      const bounced = Math.hypot(ball.vx, ball.vy) * WALL_BOUNCE;
       const angle = Phaser.Math.FloatBetween(-BOUNCE_SPREAD, BOUNCE_SPREAD);
-      this.ballVx = speed * Math.sin(angle);
-      this.ballVy = speed * Math.cos(angle);
-      this.hitWall = true;
+      ball.vx = bounced * Math.sin(angle);
+      ball.vy = bounced * Math.cos(angle);
+      ball.hitWall = true;
     }
 
-    if (this.ballY > this.ballRestY) {
-      this.ballY = this.ballRestY;
-      this.ballVy = -Math.abs(this.ballVy) * WALL_BOUNCE;
+    if (ball.y > this.ballRestY) {
+      ball.y = this.ballRestY;
+      ball.vy = -Math.abs(ball.vy) * WALL_BOUNCE;
     }
   }
 
@@ -740,74 +915,184 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   private highlightColumnUnderBall(): void {
-    const cx = GRID_LEFT + this.columnUnderBall() * CELL_W + CELL_W / 2;
+    // With several balls up, the column strip tracks whichever is still moving - it is a
+    // "where is this going" hint, and a ball that has already stopped has no answer left.
+    const tracked = this.balls.find((b) => !b.resting) ?? this.balls[0];
+    if (!tracked) return;
+    const cx = GRID_LEFT + this.columnAt(tracked.x) * CELL_W + CELL_W / 2;
     this.columnHighlight.setPosition(cx, HEADER_TOP);
   }
 
-  private columnUnderBall(): number {
-    return Phaser.Math.Clamp(Math.floor((this.ballX - GRID_LEFT) / CELL_W), 0, ROWS.length - 1);
+  private columnAt(x: number): number {
+    return Phaser.Math.Clamp(Math.floor((x - GRID_LEFT) / CELL_W), 0, ROWS.length - 1);
   }
 
-  /** Which board row the ball is sitting in; a ZONKE rests above row 10, so it pays out there. */
-  private rowSlotUnderBall(): number {
-    return Phaser.Math.Clamp(
-      Math.floor((this.ballY - LOG_TOP) / ROW_H),
-      0,
-      MAX_VISIBLE_ROWS - 1
-    );
+  /** Which board row a ball is sitting in; a ZONKE rests above row 10, so it pays out there. */
+  private rowSlotAt(y: number): number {
+    return Phaser.Math.Clamp(Math.floor((y - LOG_TOP) / ROW_H), 0, MAX_VISIBLE_ROWS - 1);
   }
 
-  /** The ball has stopped. Whatever cell it is sitting in is the result. */
-  private settle(): void {
-    this.flying = false;
-    this.ballVx = 0;
-    this.ballVy = 0;
-    this.ball.setPosition(this.ballX, this.ballY);
-    this.columnHighlight.setVisible(false);
+  /** One ball has stopped. Whatever cell it is sitting in is that ball's result. */
+  private settleBall(ball: FlightBall): void {
+    ball.resting = true;
+    ball.vx = 0;
+    ball.vy = 0;
+    // A ball can trickle to a stop in the gutter below row 1 - a weak shot, or a splinter
+    // that spent itself bouncing off the floor. rowSlotAt already scores that as row 1, so
+    // park it in row 1 too: a ball sitting outside the grid while row 1 takes the hit just
+    // reads as a bug.
+    if (ball.y > TABLE_BOTTOM) ball.y = TABLE_BOTTOM - ROW_H / 2;
+    ball.gfx.setPosition(ball.x, ball.y);
 
     // Coming to rest above row 10 means it stopped in the ZONKE band - the jackpot.
-    const jackpot = this.ballY < LOG_TOP;
-    const result: LaunchResult = jackpot ? 'ZONKE' : (ROWS[this.columnUnderBall()] as Row);
-    const knockedBack = this.hitWall && !jackpot;
-    const slot = this.rowSlotUnderBall();
+    const jackpot = ball.y < LOG_TOP;
+    const result: LaunchResult = jackpot ? 'ZONKE' : (ROWS[this.columnAt(ball.x)] as Row);
+    const slot = this.rowSlotAt(ball.y);
+    this.landings.push({ result, slot, overCharged: ball.hitWall && !jackpot });
 
-    this.time.delayedCall(450, () => {
-      this.resolveLaunch(this.activeIndex as 0 | 1, result, slot, knockedBack);
+    // The split row fires on a direct landing only, once per turn, and never off a ball
+    // that is itself a splinter - that is what keeps one lucky shot from cascading forever.
+    if (!jackpot && !ball.fromSplit && !this.splitUsedThisTurn && slot === this.splitRow) {
+      this.splitBall(ball, slot);
+      return;
+    }
+
+    if (this.balls.every((b) => b.resting)) this.onAllSettled();
+  }
+
+  /**
+   * The green row's payoff: the ball that landed on it bursts into 2-5 balls, each thrown
+   * off at its own random speed and heading. Every one of them scores wherever it comes to
+   * rest, so a single shot can work several rows - or hit ZONKE - all at once.
+   */
+  private splitBall(origin: FlightBall, slot: number): void {
+    this.splitUsedThisTurn = true;
+    const count = Phaser.Math.Between(SPLIT_MIN_BALLS, SPLIT_MAX_BALLS);
+    this.flashSplitRow(slot);
+
+    for (let i = 0; i < count; i++) {
+      // Headings fan out around straight up rather than over a full circle: a ball sent
+      // straight back down just parks itself on the launcher without crossing a row.
+      const angle = Phaser.Math.FloatBetween(-2.2, 2.2);
+      // Each ball gets its own random distance to travel, which IS its own speed once
+      // friction is accounted for - the same power-to-distance maths the launcher uses.
+      const distance = APEX_SPAN * Phaser.Math.FloatBetween(0.15, 1);
+      const speed = Math.sqrt(2 * FRICTION * distance);
+      const gfx = this.add.circle(origin.x, origin.y, BALL_R * 0.78, SPLIT_COLOR_HEX);
+      this.balls.push({
+        gfx,
+        x: origin.x,
+        y: origin.y,
+        vx: speed * Math.sin(angle),
+        vy: -speed * Math.cos(angle),
+        resting: false,
+        hitWall: false,
+        fromSplit: true,
+      });
+    }
+
+    this.messageText.setText(`SPLIT! The ball burst into ${count} - every one of them scores.`);
+    track('split_row_hit', { balls: count, mode: this.mode?.name });
+  }
+
+  /** The row itself turning green, for the moment a ball lands on it. */
+  private flashSplitRow(slot: number): void {
+    const flash = this.add
+      .rectangle(
+        GRID_LEFT + (ROWS.length * CELL_W) / 2,
+        LOG_TOP + slot * ROW_H + ROW_H / 2,
+        ROWS.length * CELL_W,
+        ROW_H,
+        SPLIT_COLOR_HEX,
+        0.85
+      )
+      .setOrigin(0.5)
+      .setDepth(2);
+    this.tweens.add({
+      targets: flash,
+      alpha: 0,
+      duration: 600,
+      onComplete: () => flash.destroy(),
     });
   }
 
-  private resolveLaunch(
-    activeIndexAtLaunch: 0 | 1,
-    result: LaunchResult,
-    slot: number,
-    overCharged = false
-  ): void {
+  /** Nothing is moving any more - every ball's landing is applied together. */
+  private onAllSettled(): void {
+    this.flying = false;
+    this.columnHighlight.setVisible(false);
+    const landings = this.landings;
+    const activeAtLaunch = this.activeIndex as 0 | 1;
+    this.time.delayedCall(450, () => this.resolveLaunch(activeAtLaunch, landings));
+  }
+
+  /** Clears away the splinters from a split, leaving the launcher's own ball alone. */
+  private clearSplitBalls(): void {
+    this.balls.forEach((ball) => {
+      if (ball.fromSplit) ball.gfx.destroy();
+    });
+  }
+
+  /**
+   * Applies every ball's landing from this turn, in the order they came to rest. A normal
+   * shot has exactly one; a split has the landing that triggered it plus one per splinter.
+   */
+  private resolveLaunch(activeIndexAtLaunch: 0 | 1, landings: Landing[]): void {
     const active = this.players[activeIndexAtLaunch];
     const opponent = this.players[1 - activeIndexAtLaunch];
+    const didSplit = this.splitUsedThisTurn;
 
-    const outcome = this.applyToBoard(activeIndexAtLaunch, result, slot, active, opponent);
-    this.messageText.setText(
-      overCharged
+    let bonusHit = false;
+    let kills = 0;
+    let lastMessage = '';
+    landings.forEach((landing) => {
+      const outcome = this.applyToBoard(
+        activeIndexAtLaunch,
+        landing.result,
+        landing.slot,
+        active,
+        opponent
+      );
+      // applyToBoard records the bonus per landing; across a split, any one of them
+      // claiming the gold row is what should stop the countdown ticking down.
+      if (this.bonusJustHit) bonusHit = true;
+      if (outcome.kind === 'kill') kills += 1;
+      lastMessage = landing.overCharged
         ? `Too much power - the wall threw it back. ${outcome.message}`
-        : outcome.message
-    );
+        : outcome.message;
+    });
+    this.bonusJustHit = bonusHit;
+
+    // One landing's message is the whole story. Several need a headline, or a kill from the
+    // third ball of a split would be buried under whatever the fifth one happened to do.
+    const headline = didSplit
+      ? `Split into ${landings.length - 1} balls${kills > 0 ? ` - ${kills} row(s) down!` : ''}. `
+      : '';
+    this.messageText.setText(`${headline}${lastMessage}`);
+
     // Kills may have just changed, so re-check who (if anyone) is behind and needs a
     // lifeline - appears the moment someone pulls ahead, gone once it's even again.
     this.ensureLifeline();
+    // Open, count down, or roll for a new one - see tickSplitRow for why it is this rare.
+    this.tickSplitRow(didSplit);
 
     this.redrawAll();
 
     const win = checkWin(this.players[0], this.players[1]);
-    if (win.gameOver) {
+    if (win.gameOver && win.winner) {
       this.gameOver = true;
-      this.gameOverText.setText(`${win.reason ?? 'Game over'}  (tap, or press R, to restart)`);
-      this.turnText.setText('Game Over');
+      this.matchEndedAt = this.time.now;
+      this.updateClock();
+      // The win screen carries all of this now, in letters you can read across the room.
+      this.gameOverText.setText('');
+      this.turnText.setText('');
       track('game_over', {
         mode: this.mode?.name,
-        result: win.winner === this.players[0] ? 'p1_win' : win.winner === this.players[1] ? 'cpu_win' : 'tie',
+        result: win.winner === this.players[0] ? 'p1_win' : 'cpu_win',
         p1Kills: this.players[0].kills,
         cpuKills: this.players[1].kills,
+        durationMs: Math.round(this.matchDurationMs()),
       });
+      this.showCelebration(win.winner, win.reason ?? '');
       return;
     }
 
@@ -846,7 +1131,10 @@ export class ZonkeScene extends Phaser.Scene {
     let next = this.bonusRow;
     do {
       next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (MAX_VISIBLE_ROWS > 1 && (next === this.bonusRow || next === this.lifelineRow));
+    } while (
+      MAX_VISIBLE_ROWS > 1 &&
+      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
+    );
     this.bonusRow = next;
     this.bonusTurnsLeft = Phaser.Math.Between(3, 6);
     this.bonusHighlight.setPosition(
@@ -876,7 +1164,10 @@ export class ZonkeScene extends Phaser.Scene {
     let next: number;
     do {
       next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
-    } while (MAX_VISIBLE_ROWS > 1 && (next === this.bonusRow || next === this.lifelineRow));
+    } while (
+      MAX_VISIBLE_ROWS > 1 &&
+      (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow)
+    );
     this.lifelineRow = next;
     // "Reasonable double or triple" - random each time, and always shown as a number rather
     // than left for the player to guess at.
@@ -885,6 +1176,66 @@ export class ZonkeScene extends Phaser.Scene {
     const y = LOG_TOP + this.lifelineRow * ROW_H + ROW_H / 2;
     this.lifelineHighlight.setPosition(x, y).setVisible(true);
     this.lifelineLabel.setText(`${this.lifelineMultiplier}x`).setPosition(x, y).setVisible(true);
+  }
+
+  /**
+   * Rolls for the match's one green row, after every launch. Unlike the gold and orange
+   * rows, which are always somewhere on the board, this one is usually absent: it has to be
+   * rolled for, it lasts fifteen seconds, and once that window is spent no second one can
+   * open for the rest of the game. A match ending without a single green row is an
+   * perfectly ordinary match - that scarcity is the whole point of it.
+   */
+  private tickSplitRow(claimed: boolean): void {
+    if (claimed) {
+      this.closeSplitRow();
+      return;
+    }
+    if (this.splitRow !== null) return; // open - update() runs its fifteen-second clock
+    if (this.splitSeenThisGame) return; // spent, and it does not come back this match
+    if (Math.random() < SPLIT_SPAWN_CHANCE) this.openSplitRow();
+  }
+
+  /** The one green row of the match opens, clear of the other two, for fifteen seconds. */
+  private openSplitRow(): void {
+    let next: number;
+    do {
+      next = Phaser.Math.Between(0, MAX_VISIBLE_ROWS - 1);
+    } while (MAX_VISIBLE_ROWS > 1 && (next === this.bonusRow || next === this.lifelineRow));
+    this.splitRow = next;
+    this.splitSeenThisGame = true;
+    this.splitExpiresAt = this.time.now + SPLIT_WINDOW_MS;
+    const x = GRID_LEFT + (ROWS.length * CELL_W) / 2;
+    const y = LOG_TOP + next * ROW_H + ROW_H / 2;
+    this.splitHighlight.setPosition(x, y).setVisible(true);
+    this.splitLabel.setText(`SPLIT ${SPLIT_WINDOW_MS / 1000}s`).setPosition(x, y).setVisible(true);
+    // One chance per match, on the clock - a player not watching that row would otherwise
+    // miss the only one the whole game is going to offer.
+    this.messageText.setText(
+      `${this.messageText.text}  A GREEN SPLIT ROW opened on row ${rowLabel(next)} - ${SPLIT_WINDOW_MS / 1000} seconds to land on it!`
+    );
+    track('split_row_opened', { row: rowLabel(next), mode: this.mode?.name });
+  }
+
+  /**
+   * Counts the open row's fifteen seconds down on its own label. The clock is held while a
+   * ball is in the air: a shot already on its way to the green row has earned its chance,
+   * and having the window shut underneath it mid-flight would just read as a cheat.
+   */
+  private updateSplitWindow(): void {
+    if (this.splitRow === null) return;
+    if (this.flying || this.charging) return;
+    const secondsLeft = Math.ceil((this.splitExpiresAt - this.time.now) / 1000);
+    if (secondsLeft <= 0) {
+      this.closeSplitRow();
+      return;
+    }
+    this.splitLabel.setText(`SPLIT ${secondsLeft}s`);
+  }
+
+  private closeSplitRow(): void {
+    this.splitRow = null;
+    this.splitHighlight.setVisible(false);
+    this.splitLabel.setVisible(false);
   }
 
   /** Whichever player currently has fewer kills - who the lifeline is for, if it exists. */
@@ -994,6 +1345,223 @@ export class ZonkeScene extends Phaser.Scene {
           ? `${active.name} hit ZONKE - ${drew} row(s) drew their next part!`
           : `${prefix}${active.name} landed on row ${rowLabel(slot)} - drew ${part}`,
     };
+  }
+
+  /**
+   * The end of a match is an event, not a status line: the board dims, the winner's name
+   * fills the screen, and the run's own numbers - kills and how long it took - are offered
+   * for the leaderboard right there, which is the only moment they exist.
+   */
+  private showCelebration(winner: PlayerState, reason: string): void {
+    const DEPTH = 20;
+    const human = this.players[0];
+    const cpu = this.players[1];
+    const playerWon = winner === human;
+    const durationMs = Math.round(this.matchDurationMs());
+    const maxW = CANVAS_W * 0.92;
+
+    // Interactive purely to swallow taps, so nothing reaches the board underneath.
+    this.add
+      .rectangle(CENTER_X, CANVAS_H / 2, CANVAS_W, CANVAS_H, 0x000000, 0.86)
+      .setOrigin(0.5)
+      .setDepth(DEPTH)
+      .setInteractive();
+
+    this.launchConfetti(DEPTH + 1, playerWon);
+
+    const title = this.add
+      .text(CENTER_X, 0, `${winner.name.toUpperCase()} WINS!`, {
+        fontSize: fs(88),
+        color: playerWon ? '#ffd54f' : '#ff8a65',
+        fontStyle: 'bold',
+        align: 'center',
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(DEPTH + 2);
+    fitLabel(title, maxW);
+
+    const subtitle = this.add
+      .text(CENTER_X, 0, reason, {
+        fontSize: fs(22),
+        color: '#dddddd',
+        align: 'center',
+        wordWrap: { width: maxW },
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(DEPTH + 2);
+
+    const stats = this.add
+      .text(
+        CENTER_X,
+        0,
+        `Kills  ${human.kills} - ${cpu.kills}      Time  ${formatClock(durationMs)}`,
+        { fontSize: fs(26), color: '#ffffff', fontStyle: 'bold' }
+      )
+      .setOrigin(0.5, 0)
+      .setDepth(DEPTH + 2);
+    fitLabel(stats, maxW);
+
+    let btnW = Math.min(440 * S, CANVAS_W * 0.86);
+    let btnH = 54 * S;
+    const makeButton = (label: string, color: number, onClick: () => void) => {
+      const rect = this.add
+        .rectangle(CENTER_X, 0, btnW, btnH, color, 0.16)
+        .setStrokeStyle(1, color, 0.85)
+        .setDepth(DEPTH + 2)
+        .setInteractive({ useHandCursor: true });
+      const text = this.add
+        .text(CENTER_X, 0, label, { fontSize: fs(23), color: '#ffffff' })
+        .setOrigin(0.5)
+        .setDepth(DEPTH + 3);
+      fitLabel(text, btnW - 20 * S);
+      rect.on(
+        'pointerdown',
+        (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+          event.stopPropagation();
+          onClick();
+        }
+      );
+      return { rect, text };
+    };
+
+    const board = this.add
+      .text(CENTER_X, 0, '', {
+        fontSize: fs(18),
+        color: '#cccccc',
+        align: 'center',
+        lineSpacing: 5 * S,
+      })
+      .setOrigin(0.5, 0)
+      .setDepth(DEPTH + 2);
+
+    let saving = false;
+    let saved = false;
+    const setButtonLabel = (btn: { text: Phaser.GameObjects.Text }, label: string): void => {
+      btn.text.setFontSize(Math.max(1, Math.round(23 * S)));
+      btn.text.setText(label);
+      fitLabel(btn.text, btnW - 20 * S);
+    };
+
+    const save = makeButton(
+      `Save my score - ${human.kills} kills in ${formatClock(durationMs)}`,
+      0x4caf50,
+      () => void onSave()
+    );
+
+    const onSave = async (): Promise<void> => {
+      if (saving || saved) return;
+      saving = true;
+      setButtonLabel(save, 'Saving...');
+      const ok = await submitScore(
+        human.name,
+        human.kills,
+        // The API's floor is one second; a match can't realistically be shorter, but a
+        // rejected submission over a rounding edge would be a silly way to lose a run.
+        Math.max(1000, durationMs),
+        'zonke'
+      );
+      saving = false;
+      // A restart while the request was in flight destroys these objects - Phaser clears
+      // .scene on destroy, which is the cheapest way to ask "is this still on screen?".
+      if (!save.text.scene || !board.scene) return;
+      if (!ok) {
+        setButtonLabel(save, 'Save failed - tap to try again');
+        return;
+      }
+      saved = true;
+      setButtonLabel(save, 'Score saved');
+      track('score_saved', { mode: this.mode?.name, kills: human.kills, durationMs });
+      board.setText('Loading leaderboard...');
+      const top = await fetchTopScores(5, 'zonke');
+      if (!board.scene) return;
+      board.setText(
+        top.length
+          ? ['Top runs', ...top.map((r, i) => `${i + 1}. ${r.name}  -  ${r.score} kills  (${formatClock(r.durationMs)})`)].join('\n')
+          : 'No saved runs yet.'
+      );
+    };
+
+    const play = makeButton('Play again', 0xffd54f, () => this.restartGame());
+
+    // Laid out as a measured top-down stack, the same way the difficulty picker is, so
+    // nothing overlaps once wrapping and font-fitting have had their say.
+    let gap = 16 * S;
+    const stack = (): number => {
+      // The leaderboard arrives later; hold its space now so it can't run off the bottom.
+      board.setText('\n\n\n\n\n');
+      let cy = 0;
+      title.setY(cy);
+      cy += title.height + gap;
+      subtitle.setY(cy);
+      cy += subtitle.height + gap * 0.5;
+      stats.setY(cy);
+      cy += stats.height + gap;
+      [save, play].forEach(({ rect, text }) => {
+        rect.setY(cy + btnH / 2);
+        text.setY(cy + btnH / 2);
+        cy += btnH + gap * 0.5;
+      });
+      cy += gap * 0.4;
+      board.setY(cy);
+      cy += board.height;
+      board.setText('');
+      return cy;
+    };
+
+    let contentH = stack();
+    if (contentH > CANVAS_H * 0.94) {
+      const shrink = Phaser.Math.Clamp((CANVAS_H * 0.94) / contentH, 0.5, 1);
+      [title, subtitle, stats, board, save.text, play.text].forEach((t) =>
+        t.setFontSize(Math.max(9, Math.round(parseInt(t.style.fontSize as string, 10) * shrink)))
+      );
+      btnH *= shrink;
+      btnW *= shrink;
+      gap *= shrink;
+      [save, play].forEach(({ rect }) => rect.setSize(btnW, btnH));
+      contentH = stack();
+    }
+
+    const startY = Math.max(8 * S, (CANVAS_H - contentH) / 2);
+    [title, subtitle, stats, board].forEach((t) => t.setY(t.y + startY));
+    [save, play].forEach(({ rect, text }) => {
+      rect.setY(rect.y + startY);
+      text.setY(text.y + startY);
+    });
+
+    // The name lands, then breathes - a static headline reads like an error dialog.
+    this.tweens.add({ targets: title, scale: { from: 0.55, to: 1 }, ease: 'Back.Out', duration: 550 });
+    this.tweens.add({
+      targets: title,
+      scale: { from: 1, to: 1.04 },
+      duration: 900,
+      delay: 600,
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  /** Paper falling over the win screen. Muted when it was the CPU that won. */
+  private launchConfetti(depth: number, celebratory: boolean): void {
+    const colors = celebratory
+      ? [0xffd54f, 0x4caf50, 0x2196f3, 0xff5252, 0xffffff, SPLIT_COLOR_HEX]
+      : [0x666666, 0x888888, 0xaaaaaa];
+    for (let i = 0; i < 44; i++) {
+      const x = Phaser.Math.Between(0, CANVAS_W);
+      const w = Phaser.Math.Between(6, 13) * S;
+      const piece = this.add
+        .rectangle(x, -20 * S, w, w * Phaser.Math.FloatBetween(0.35, 0.7), Phaser.Utils.Array.GetRandom(colors))
+        .setDepth(depth)
+        .setAngle(Phaser.Math.Between(0, 360));
+      this.tweens.add({
+        targets: piece,
+        y: CANVAS_H + 40 * S,
+        x: x + Phaser.Math.Between(-90, 90) * S,
+        angle: piece.angle + Phaser.Math.Between(180, 720),
+        duration: Phaser.Math.Between(2400, 4600),
+        delay: Phaser.Math.Between(0, 2600),
+        repeat: -1,
+      });
+    }
   }
 
   private restartGame(): void {

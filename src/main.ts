@@ -29,4 +29,12 @@ const config: Phaser.Types.Core.GameConfig = {
   scene: [ZonkeScene, TimeAttackScene],
 };
 
-new Phaser.Game(config);
+const game = new Phaser.Game(config);
+
+// Dev-only handle for the browser-driven checks in scripts/ - they need to steer a real
+// match (force a landing on the split row, jump to the win screen) rather than press the
+// mouse at random and hope. Vite folds import.meta.env.DEV to false in a production
+// build, so this block is dropped from the shipped bundle entirely.
+if (import.meta.env.DEV) {
+  (window as Window & { zonkeGame?: Phaser.Game }).zonkeGame = game;
+}

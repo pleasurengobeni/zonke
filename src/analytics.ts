@@ -37,15 +37,29 @@ export function track(type: string, payload?: Record<string, unknown>): void {
   }
 }
 
-export async function submitScore(name: string, score: number, durationMs: number): Promise<void> {
+/** Each mode keeps its own leaderboard: Zonke scores in kills, Time Attack in points. */
+export type ScoreMode = 'timeattack' | 'zonke';
+
+/**
+ * Returns whether the score actually made it, so the UI can tell the player the truth
+ * instead of showing "Saved!" over a request that never landed.
+ */
+export async function submitScore(
+  name: string,
+  score: number,
+  durationMs: number,
+  mode: ScoreMode = 'timeattack'
+): Promise<boolean> {
   try {
-    await fetch('/api/scores', {
+    const res = await fetch('/api/scores', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, score, durationMs }),
+      body: JSON.stringify({ name, score, durationMs, mode }),
     });
+    return res.ok;
   } catch {
     // best-effort - a failed submission shouldn't block showing the player their score
+    return false;
   }
 }
 
@@ -53,12 +67,14 @@ export interface TopScore {
   name: string;
   score: number;
   durationMs: number;
+  mode?: ScoreMode;
   createdAt: string;
 }
 
-export async function fetchTopScores(limit = 10): Promise<TopScore[]> {
+export async function fetchTopScores(limit = 10, mode?: ScoreMode): Promise<TopScore[]> {
   try {
-    const res = await fetch(`/api/scores/top?limit=${limit}`);
+    const query = `limit=${limit}${mode ? `&mode=${mode}` : ''}`;
+    const res = await fetch(`/api/scores/top?${query}`);
     if (!res.ok) return [];
     return (await res.json()) as TopScore[];
   } catch {
