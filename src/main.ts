@@ -1,10 +1,13 @@
 import Phaser from 'phaser';
 import { ZonkeScene } from './scenes/ZonkeScene';
 
-// visualViewport tracks the real visible area (excludes iOS Safari's address/tab bars),
-// falling back to innerWidth/Height on browsers that lack it.
-const width = window.visualViewport?.width ?? window.innerWidth;
-const height = window.visualViewport?.height ?? window.innerHeight;
+// innerWidth/Height is what correctly tracks the real CSS viewport in every case that
+// matters here, including Chrome DevTools' device emulation - visualViewport is meant for
+// tracking iOS Safari's dynamic toolbar and is unreliable as the initial boot size (it has
+// been seen reporting the real desktop window's size under device emulation instead of the
+// emulated one), so it is not used for this synchronous read.
+const width = window.innerWidth;
+const height = window.innerHeight;
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,

@@ -167,7 +167,7 @@ export class ZonkeScene extends Phaser.Scene {
   private bulletGfx!: Phaser.GameObjects.Graphics;
   private laidOutW = 0;
   private laidOutH = 0;
-  private resizePending = false;
+  private resizeTimer?: Phaser.Time.TimerEvent;
 
   constructor() {
     super('ZonkeScene');
@@ -719,9 +719,13 @@ export class ZonkeScene extends Phaser.Scene {
   private onScaleResize(gameSize: { width: number; height: number }): void {
     const dw = Math.abs(gameSize.width - this.laidOutW);
     const dh = Math.abs(gameSize.height - this.laidOutH);
-    if (this.resizePending || (dw < 60 && dh < 60)) return;
-    this.resizePending = true;
-    this.time.delayedCall(150, () => {
+    if (dw < 60 && dh < 60) return;
+    // Dragging a DevTools device frame (or an OS window edge) fires many resize events in
+    // quick succession - debounce so a settling drag collapses into one restart against the
+    // final size, instead of restarting mid-drag against whatever size happened to be
+    // current when the very first event arrived.
+    this.resizeTimer?.remove();
+    this.resizeTimer = this.time.delayedCall(250, () => {
       this.scene.restart({ mode: this.mode });
     });
   }
