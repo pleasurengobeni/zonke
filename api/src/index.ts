@@ -138,6 +138,202 @@ app.get('/stats', (_req, res) => {
   });
 });
 
+// ---- funnel: visitors -> picked a mode -> finished, plus how long they stuck around ----
+//
+// A "finish" is game_over (the main PvCPU mode) or time_attack_finished (Time Attack) -
+// whichever the session actually reached. Drop-off is inferred, not a separate event: a
+// session that has mode_selected but neither finish event never sent one because it never
+// happened - the tab was closed, the game was abandoned, whatever it was.
+
+interface FunnelRow { n: number }
+interface NamedCount { name: string | null; n: number }
+
+function getFunnel() {
+  const visitors = (db.prepare(
+    `SELECT COUNT(DISTINCT session_id) as n FROM events WHERE event_type = 'page_view'`
+  ).get() as FunnelRow).n;
+
+  const started = (db.prepare(
+    `SELECT COUNT(DISTINCT session_id) as n FROM events WHERE event_type = 'mode_selected'`
+  ).get() as FunnelRow).n;
+
+  const finished = (db.prepare(
+    `SELECT COUNT(DISTINCT session_id) as n FROM events
+     WHERE event_type IN ('game_over', 'time_attack_finished')`
+  ).get() as FunnelRow).n;
+
+  const byMode = db.prepare(
+    `SELECT json_extract(payload, '$.mode') as name, COUNT(DISTINCT session_id) as n
+     FROM events WHERE event_type = 'mode_selected' GROUP BY name ORDER BY n DESC`
+  ).all() as NamedCount[];
+
+  // Per mode, how many of the sessions that picked it went on to actually finish - the
+  // per-mode version of the same drop-off question.
+  const finishByMode = db.prepare(
+    `SELECT json_extract(ms.payload, '$.mode') as name, COUNT(DISTINCT ms.session_id) as n
+     FROM events ms
+     WHERE ms.event_type = 'mode_selected'
+       AND EXISTS (
+         SELECT 1 FROM events f
+         WHERE f.session_id = ms.session_id
+           AND f.event_type IN ('game_over', 'time_attack_finished')
+           AND f.created_at >= ms.created_at
+       )
+     GROUP BY name`
+  ).all() as NamedCount[];
+
+  // Session duration: last event minus first event, for sessions with more than one event
+  // (a single page_view and nothing else has no "duration" worth counting).
+  const duration = db.prepare(
+    `SELECT AVG(d) as avgSec, MAX(d) as maxSec FROM (
+       SELECT (julianday(MAX(created_at)) - julianday(MIN(created_at))) * 86400 as d
+       FROM events GROUP BY session_id HAVING COUNT(*) >= 2
+     )`
+  ).get() as { avgSec: number | null; maxSec: number | null };
+
+  const deviceBreakdown = db.prepare(
+    `SELECT viewport as name, COUNT(DISTINCT session_id) as n FROM events
+     WHERE viewport IS NOT NULL GROUP BY viewport ORDER BY n DESC LIMIT 15`
+  ).all() as NamedCount[];
+
+  const recentSessions = db.prepare(
+    `SELECT session_id as sessionId, MIN(created_at) as firstSeen, MAX(created_at) as lastSeen,
+            COUNT(*) as events,
+            MAX(CASE WHEN event_type = 'mode_selected' THEN json_extract(payload, '$.mode') END) as mode,
+            MAX(CASE WHEN event_type IN ('game_over','time_attack_finished') THEN 1 ELSE 0 END) as finished
+     FROM events GROUP BY session_id ORDER BY lastSeen DESC LIMIT 25`
+  ).all();
+
+  const byModeMap = new Map(byMode.map((r) => [r.name ?? '(unknown)', r.n]));
+  const finishByModeMap = new Map(finishByMode.map((r) => [r.name ?? '(unknown)', r.n]));
+  const modes = [...byModeMap.keys()].map((name) => ({
+    name,
+    started: byModeMap.get(name) ?? 0,
+    finished: finishByModeMap.get(name) ?? 0,
+  }));
+
+  return {
+    visitors,
+    started,
+    finished,
+    droppedBeforeStarting: Math.max(0, visitors - started),
+    droppedMidGame: Math.max(0, started - finished),
+    startRate: visitors > 0 ? started / visitors : null,
+    finishRate: started > 0 ? finished / started : null,
+    modes,
+    avgSessionSeconds: duration.avgSec,
+    maxSessionSeconds: duration.maxSec,
+    deviceBreakdown,
+    recentSessions,
+  };
+}
+
+app.get('/stats/funnel', (_req, res) => {
+  res.json(getFunnel());
+});
+
+function fmtSeconds(s: number | null): string {
+  if (s === null || !Number.isFinite(s)) return '-';
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return m > 0 ? `${m}m ${rem}s` : `${rem}s`;
+}
+
+function pct(n: number | null): string {
+  return n === null ? '-' : `${Math.round(n * 100)}%`;
+}
+
+function esc(s: unknown): string {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
+// A readable page instead of raw JSON - same Basic Auth as every other /api/stats route
+// (enforced by the host nginx, not this app), just rendered instead of dumped.
+app.get('/stats/dashboard', (_req, res) => {
+  const f = getFunnel();
+  const barWidth = (n: number, max: number) => (max > 0 ? Math.round((n / max) * 100) : 0);
+  const funnelMax = f.visitors || 1;
+
+  res.type('html').send(`<!doctype html>
+<html><head><meta charset="utf-8"><title>Zonke stats</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #eee; margin: 0; padding: 24px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; color: #ffd54f; margin: 32px 0 10px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 24px; }
+  .funnel-row { display: flex; align-items: center; gap: 12px; margin: 10px 0; }
+  .funnel-label { width: 160px; font-size: 13px; }
+  .funnel-bar-track { flex: 1; background: #2a2a2a; border-radius: 4px; overflow: hidden; height: 22px; }
+  .funnel-bar { background: #4fc3f7; height: 100%; }
+  .funnel-n { width: 90px; text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #333; }
+  th { color: #888; font-weight: normal; }
+  .stat-grid { display: flex; gap: 24px; flex-wrap: wrap; }
+  .stat-box { background: #242424; border-radius: 6px; padding: 14px 18px; min-width: 140px; }
+  .stat-box .n { font-size: 24px; font-weight: bold; color: #ffd54f; }
+  .stat-box .l { font-size: 12px; color: #888; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+</style></head>
+<body>
+  <h1>Zonke - site stats</h1>
+  <div class="sub">GET /api/stats for raw JSON, /api/stats/events for the paginated raw log</div>
+
+  <h2>Funnel</h2>
+  <div class="funnel-row">
+    <div class="funnel-label">Visited</div>
+    <div class="funnel-bar-track"><div class="funnel-bar" style="width:${barWidth(f.visitors, funnelMax)}%"></div></div>
+    <div class="funnel-n">${f.visitors}</div>
+  </div>
+  <div class="funnel-row">
+    <div class="funnel-label">Picked a mode</div>
+    <div class="funnel-bar-track"><div class="funnel-bar" style="width:${barWidth(f.started, funnelMax)}%"></div></div>
+    <div class="funnel-n">${f.started} (${pct(f.startRate)})</div>
+  </div>
+  <div class="funnel-row">
+    <div class="funnel-label">Finished a round</div>
+    <div class="funnel-bar-track"><div class="funnel-bar" style="width:${barWidth(f.finished, funnelMax)}%"></div></div>
+    <div class="funnel-n">${f.finished} (${pct(f.finishRate)})</div>
+  </div>
+
+  <div class="stat-grid" style="margin-top:20px">
+    <div class="stat-box"><div class="n">${f.droppedBeforeStarting}</div><div class="l">visited, never played</div></div>
+    <div class="stat-box"><div class="n">${f.droppedMidGame}</div><div class="l">started, never finished</div></div>
+    <div class="stat-box"><div class="n">${fmtSeconds(f.avgSessionSeconds)}</div><div class="l">avg time on site</div></div>
+    <div class="stat-box"><div class="n">${fmtSeconds(f.maxSessionSeconds)}</div><div class="l">longest session</div></div>
+  </div>
+
+  <h2>By mode</h2>
+  <table>
+    <tr><th>Mode</th><th>Started</th><th>Finished</th><th>Finish rate</th></tr>
+    ${f.modes
+      .map(
+        (m) =>
+          `<tr><td>${esc(m.name)}</td><td>${m.started}</td><td>${m.finished}</td><td>${pct(m.started > 0 ? m.finished / m.started : null)}</td></tr>`
+      )
+      .join('')}
+  </table>
+
+  <h2>Devices (by screen size)</h2>
+  <table>
+    <tr><th>Viewport</th><th>Sessions</th></tr>
+    ${f.deviceBreakdown.map((d) => `<tr><td>${esc(d.name)}</td><td>${d.n}</td></tr>`).join('')}
+  </table>
+
+  <h2>Recent sessions</h2>
+  <table>
+    <tr><th>First seen</th><th>Last seen</th><th>Events</th><th>Mode</th><th>Finished</th></tr>
+    ${(f.recentSessions as any[])
+      .map(
+        (s) =>
+          `<tr><td>${esc(s.firstSeen)}</td><td>${esc(s.lastSeen)}</td><td>${s.events}</td><td>${esc(s.mode ?? '-')}</td>` +
+          `<td><span class="dot" style="background:${s.finished ? '#4caf50' : '#ff5252'}"></span>${s.finished ? 'yes' : 'no'}</td></tr>`
+      )
+      .join('')}
+  </table>
+</body></html>`);
+});
+
 // Raw, paginated, filterable event export - the actual answer to "every possible
 // question": anything not covered by the aggregates above can be queried here directly
 // instead of waiting for a new report to be written for it.
