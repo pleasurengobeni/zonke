@@ -49,11 +49,16 @@ const P2_COLOR_HEX = 0x2196f3;
 const KILL_COLOR = '#ff5252';
 const NEUTRAL_COLOR = '#888888';
 
+const CANVAS_W = 900;
+const CENTER_X = CANVAS_W / 2;
 const CELL_W = 60;
-const GRID_LEFT = 400 - (ROWS.length * CELL_W) / 2; // centered at x=400
+const GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
 const HEADER_TOP = 95;
 const HEADER_H = 60;
-const ROW_H = 48; // full round row height (P1 + P2 sub-lines)
+const ROW_H = 58; // full row height, sized so a figure fits between rows without crowding
+// The figures live out in the margins, one per row per side, lined up with the row centre.
+const FIGURE_X: [number, number] = [GRID_LEFT / 2, (GRID_LEFT + ROWS.length * CELL_W + CANVAS_W) / 2];
+const FIGURE_SCALE = 1.3;
 const SUB_H = ROW_H / 2;
 const MAX_VISIBLE_ROWS = 10;
 const LOG_TOP = HEADER_TOP + HEADER_H;
@@ -121,15 +126,15 @@ export class ZonkeScene extends Phaser.Scene {
     this.gameOver = false;
 
     this.add
-      .text(400, 12, 'ZONKE', { fontSize: '26px', color: '#ffffff', fontStyle: 'bold' })
+      .text(CENTER_X, 12, 'ZONKE', { fontSize: '26px', color: '#ffffff', fontStyle: 'bold' })
       .setOrigin(0.5, 0);
 
-    this.add.text(85, 40, 'Player 1', { fontSize: '15px', color: P1_COLOR }).setOrigin(0.5, 0);
-    this.add.text(715, 40, 'CPU', { fontSize: '15px', color: P2_COLOR }).setOrigin(0.5, 0);
+    this.add.text(FIGURE_X[0], 40, 'Player 1', { fontSize: '15px', color: P1_COLOR }).setOrigin(0.5, 0);
+    this.add.text(FIGURE_X[1], 40, 'CPU', { fontSize: '15px', color: P2_COLOR }).setOrigin(0.5, 0);
 
     this.killTexts = [
-      this.add.text(85, 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
-      this.add.text(715, 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
+      this.add.text(FIGURE_X[0], 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
+      this.add.text(FIGURE_X[1], 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
     ];
 
     this.drawHeader();
@@ -141,23 +146,23 @@ export class ZonkeScene extends Phaser.Scene {
 
     const turnY = this.ballRestY + 30;
     this.turnText = this.add
-      .text(400, turnY, "Player 1's turn", { fontSize: '20px', color: P1_COLOR })
+      .text(CENTER_X, turnY, "Player 1's turn", { fontSize: '20px', color: P1_COLOR })
       .setOrigin(0.5, 0);
 
     this.messageText = this.add
-      .text(400, turnY + 30, 'Hold SPACE to charge, release to launch', {
+      .text(CENTER_X, turnY + 30, 'Hold SPACE to charge, release to launch', {
         fontSize: '14px',
         color: '#cccccc',
       })
       .setOrigin(0.5, 0);
 
     this.gameOverText = this.add
-      .text(400, turnY + 65, '', { fontSize: '18px', color: '#ffeb3b', fontStyle: 'bold' })
+      .text(CENTER_X, turnY + 65, '', { fontSize: '18px', color: '#ffeb3b', fontStyle: 'bold' })
       .setOrigin(0.5, 0);
 
     this.add
       .text(
-        400,
+        CENTER_X,
         turnY + 100,
         'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits.',
         { fontSize: '11px', color: '#888888' }
@@ -189,17 +194,17 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   private showModePicker(): void {
-    const panel = this.add.rectangle(400, 415, 460, 210, 0x000000, 0.82).setOrigin(0.5);
+    const panel = this.add.rectangle(CENTER_X, 445, 470, 215, 0x000000, 0.85).setOrigin(0.5);
     const title = this.add
-      .text(400, 335, 'Choose difficulty', { fontSize: '22px', color: '#ffffff', fontStyle: 'bold' })
+      .text(CENTER_X, 362, 'Choose difficulty', { fontSize: '22px', color: '#ffffff', fontStyle: 'bold' })
       .setOrigin(0.5, 0);
     const lines = MODES.map((m, i) =>
       this.add
-        .text(400, 380 + i * 34, `${i + 1}   ${m.name}`, { fontSize: '18px', color: '#ffd54f' })
+        .text(CENTER_X, 408 + i * 34, `${i + 1}   ${m.name}`, { fontSize: '18px', color: '#ffd54f' })
         .setOrigin(0.5, 0)
     );
     const hint = this.add
-      .text(400, 490, 'Harder modes charge faster and the CPU aims better', {
+      .text(CENTER_X, 518, 'Harder modes charge faster and the CPU aims better', {
         fontSize: '12px',
         color: '#aaaaaa',
       })
@@ -626,11 +631,12 @@ export class ZonkeScene extends Phaser.Scene {
     this.players.forEach((p, i) =>
       p.deadRows.forEach((dead, slot) => {
         if (!dead) return;
-        const x = i === 0 ? 85 : 715;
-        const y = LOG_TOP + slot * ROW_H + i * SUB_H + SUB_H / 2;
+        const x = FIGURE_X[i];
+        const y = LOG_TOP + slot * ROW_H + ROW_H / 2;
+        const r = 13 * FIGURE_SCALE;
         this.bulletGfx.lineStyle(3, 0xff5252, 0.95);
-        this.bulletGfx.lineBetween(x - 15, y - 16, x + 15, y + 16);
-        this.bulletGfx.lineBetween(x + 15, y - 16, x - 15, y + 16);
+        this.bulletGfx.lineBetween(x - r, y - r, x + r, y + r);
+        this.bulletGfx.lineBetween(x + r, y - r, x - r, y + r);
       })
     );
 
@@ -639,13 +645,13 @@ export class ZonkeScene extends Phaser.Scene {
     this.rowFigureParts.forEach((row, slot) =>
       row.forEach((count, sub) => {
         if (count === 0) return;
-        const rowY = LOG_TOP + slot * ROW_H;
         this.drawMiniFigure(
           this.miniFigureGfx[slot][sub],
-          sub === 0 ? 85 : 715,
-          rowY + sub * SUB_H + SUB_H / 2,
+          FIGURE_X[sub],
+          LOG_TOP + slot * ROW_H + ROW_H / 2,
           FIGURE_PARTS.map((_part, i) => i < count),
-          sub as 0 | 1
+          sub as 0 | 1,
+          FIGURE_SCALE
         );
       })
     );
