@@ -496,6 +496,7 @@ export class ZonkeScene extends Phaser.Scene {
     this.input.keyboard!.on('keydown-TWO', () => this.chooseMode(1), this);
     this.input.keyboard!.on('keydown-THREE', () => this.chooseMode(2), this);
     this.input.keyboard!.on('keydown-FOUR', () => this.startTimeAttack(), this);
+    this.input.keyboard!.on('keydown-FIVE', () => this.startOnline(), this);
 
     // Touch/mouse: press-and-hold anywhere on the board to charge, same as holding SPACE.
     // Tapping while the game is over restarts, so there is no keyboard-only control left.
@@ -614,6 +615,11 @@ export class ZonkeScene extends Phaser.Scene {
         color: '#4fc3f7',
         onClick: () => this.startTimeAttack(),
       },
+      {
+        label: '5   Play someone online',
+        color: '#00e676',
+        onClick: () => this.startOnline(),
+      },
     ];
     const buttonPairs = pickerButtons.map(({ label: text, color, onClick }) => {
       const btn = this.add
@@ -717,6 +723,13 @@ export class ZonkeScene extends Phaser.Scene {
     this.turnText.setText(`${this.players[0].name}'s turn`);
     this.messageText.setText('Hold to charge, release to launch');
     this.armBall();
+  }
+
+  /** Hands over to the waiting room, which is loaded only if somebody asks for it. */
+  private startOnline(): void {
+    if (this.mode) return;
+    track('mode_selected', { mode: 'Online' });
+    void import('../online/online').then((m) => m.startOnline(this.game));
   }
 
   private startTimeAttack(): void {
@@ -1526,14 +1539,14 @@ export class ZonkeScene extends Phaser.Scene {
       fitLabel(btn.text, btnW - 20 * S);
     };
 
-    const save = makeButton(
-      `Save my score - ${human.kills} kills in ${formatClock(durationMs)}`,
-      0x4caf50,
-      () => void onSave()
-    );
+    // Only a win can be saved. The board is a fastest-WINS board, so a loss has nothing
+    // to go on it, and offering the button anyway invited people to file their defeats.
+    const save = playerWon
+      ? makeButton(`Save my score - ${human.kills} kills in ${formatClock(durationMs)}`, 0x4caf50, () => void onSave())
+      : null;
 
     const onSave = async (): Promise<void> => {
-      if (saving || saved) return;
+      if (!save || saving || saved) return;
       saving = true;
       setButtonLabel(save, 'Saving...');
       const ok = await submitScore({
@@ -1556,22 +1569,14 @@ export class ZonkeScene extends Phaser.Scene {
       saved = true;
       setButtonLabel(save, 'Score saved');
       track('score_saved', { mode: this.mode?.name, kills: human.kills, durationMs });
-      board.setText('Loading leaderboard...');
-      // The fastest WINS, not the highest scores - beating the CPU quickly is the thing
-      // worth racing, and a long grind to four kills says less than a short one.
-      const top = await fetchTopScores(10, 'zonke', 'fastest');
-      if (!board.scene) return;
-      board.setText(
-        top.length
-          ? [
-              'Fastest wins',
-              ...top.map((r, i) => `${i + 1}. ${r.name}  -  ${formatClock(r.durationMs)}  (${r.score} kills)`),
-            ].join('\n')
-          : 'No wins saved yet - be the first!'
-      );
+      await this.fillFastestBoard(board);
     };
 
     const play = makeButton('Play again', 0xffd54f, () => this.restartGame());
+    const buttons = save ? [save, play] : [play];
+
+    // A loss still gets to see the times to beat - it just has nothing to add to them.
+    if (!playerWon) void this.fillFastestBoard(board);
 
     // Laid out as a measured top-down stack, the same way the difficulty picker is, so
     // nothing overlaps once wrapping and font-fitting have had their say.
@@ -1586,7 +1591,7 @@ export class ZonkeScene extends Phaser.Scene {
       cy += subtitle.height + gap * 0.5;
       stats.setY(cy);
       cy += stats.height + gap;
-      [save, play].forEach(({ rect, text }) => {
+      buttons.forEach(({ rect, text }) => {
         rect.setY(cy + btnH / 2);
         text.setY(cy + btnH / 2);
         cy += btnH + gap * 0.5;
@@ -1601,19 +1606,19 @@ export class ZonkeScene extends Phaser.Scene {
     let contentH = stack();
     if (contentH > CANVAS_H * 0.94) {
       const shrink = Phaser.Math.Clamp((CANVAS_H * 0.94) / contentH, 0.5, 1);
-      [title, subtitle, stats, board, save.text, play.text].forEach((t) =>
+      [title, subtitle, stats, board, ...buttons.map((b) => b.text)].forEach((t) =>
         t.setFontSize(Math.max(9, Math.round(parseInt(t.style.fontSize as string, 10) * shrink)))
       );
       btnH *= shrink;
       btnW *= shrink;
       gap *= shrink;
-      [save, play].forEach(({ rect }) => rect.setSize(btnW, btnH));
+      buttons.forEach(({ rect }) => rect.setSize(btnW, btnH));
       contentH = stack();
     }
 
     const startY = Math.max(8 * S, (CANVAS_H - contentH) / 2);
     [title, subtitle, stats, board].forEach((t) => t.setY(t.y + startY));
-    [save, play].forEach(({ rect, text }) => {
+    buttons.forEach(({ rect, text }) => {
       rect.setY(rect.y + startY);
       text.setY(text.y + startY);
     });
@@ -1628,6 +1633,24 @@ export class ZonkeScene extends Phaser.Scene {
       yoyo: true,
       repeat: -1,
     });
+  }
+
+  /**
+   * The ten quickest WINS - beating the CPU fast is the thing worth racing, where a long
+   * grind to four kills says much less than a short one.
+   */
+  private async fillFastestBoard(board: Phaser.GameObjects.Text): Promise<void> {
+    board.setText('Loading leaderboard...');
+    const top = await fetchTopScores(10, 'zonke', 'fastest');
+    if (!board.scene) return;
+    board.setText(
+      top.length
+        ? [
+            'Fastest wins',
+            ...top.map((r, i) => `${i + 1}. ${r.name}  -  ${formatClock(r.durationMs)}  (${r.score} kills)`),
+          ].join('\n')
+        : 'No wins saved yet - be the first!'
+    );
   }
 
   /** Paper falling over the win screen. Muted when it was the CPU that won. */

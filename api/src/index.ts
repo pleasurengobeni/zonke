@@ -1,6 +1,8 @@
 import express from 'express';
+import { createServer } from 'node:http';
 import { db } from './db.js';
 import { rateLimit } from './rateLimit.js';
+import { attachLobby, lobbyStats } from './lobby.js';
 
 const app = express();
 // Only the host nginx (on 127.0.0.1) ever connects to this container, so trust its
@@ -414,7 +416,14 @@ app.get('/stats/events', (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+/** Who is in the waiting room right now - public, and tiny, so the lobby can show it. */
+app.get('/lobby/stats', (_req, res) => res.json(lobbyStats()));
+
+// One HTTP server for both the REST routes and the lobby's WebSocket upgrade, since nginx
+// proxies the whole of /api/ to this single port.
 const PORT = Number(process.env.PORT) || 4000;
-app.listen(PORT, () => {
-  console.log(`zonke-api listening on ${PORT}`);
+const server = createServer(app);
+attachLobby(server);
+server.listen(PORT, () => {
+  console.log(`zonke-api listening on ${PORT} (REST + /ws lobby)`);
 });

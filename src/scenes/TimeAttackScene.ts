@@ -360,48 +360,84 @@ export class TimeAttackScene extends Phaser.Scene {
       .text(CENTER_X, midY - 120 * S, `Score: ${this.score}`, { fontSize: fs(26), color: '#ffd54f', fontStyle: 'bold' })
       .setOrigin(0.5, 0)
       .setDepth(2);
-    const loading = this.add
-      .text(CENTER_X, midY - 70 * S, 'Loading leaderboard...', { fontSize: fs(16), color: '#aaaaaa' })
-      .setOrigin(0.5, 0)
-      .setDepth(2);
 
-    // The session already knows who is playing (asked once, before the first game), so a
-    // finished round goes straight onto the board instead of interrupting with a prompt.
     const name = await ensurePlayerName();
-    const saved = await submitScore({
-      name,
-      score: this.score,
-      durationMs: Math.round(this.time.now - this.roundStartAt),
-      mode: 'timeattack',
-    });
+    const durationMs = Math.round(this.time.now - this.roundStartAt);
 
-    const top = await fetchTopScores(10, 'timeattack');
-    if (!loading.scene) return; // restarted while the requests were in flight
-    loading.destroy();
-    this.add
-      .text(CENTER_X, midY - 92 * S, saved ? `Saved as ${name}` : "Couldn't save your score", {
-        fontSize: fs(15),
-        color: saved ? '#4caf50' : '#ff8a65',
-      })
+    // Nothing is submitted until the player says so. This used to save itself the moment
+    // the round ended, which put runs on the board that nobody chose to put there.
+    const btnW = Math.min(panelW * 0.82, 420 * S);
+    const btnH = 44 * S;
+    const saveBtn = this.add
+      .rectangle(CENTER_X, midY - 74 * S, btnW, btnH, 0x2e7d46, 0.9)
       .setOrigin(0.5, 0)
-      .setDepth(2);
-    const listText = top.length
-      ? top.map((r: TopScore, i: number) => `${i + 1}. ${r.name} - ${r.score}`).join('\n')
-      : 'No scores yet - be the first!';
-    this.add
-      .text(CENTER_X, midY - 60 * S, listText, {
+      .setDepth(2)
+      .setInteractive({ useHandCursor: true });
+    const saveLabel = this.add
+      .text(CENTER_X, midY - 74 * S + btnH / 2, `Save my score (${this.score})`, {
         fontSize: fs(17),
         color: '#ffffff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setDepth(3);
+
+    const listText = this.add
+      .text(CENTER_X, midY - 16 * S, 'Loading leaderboard...', {
+        fontSize: fs(16),
+        color: '#aaaaaa',
         align: 'center',
         lineSpacing: 6 * S,
       })
       .setOrigin(0.5, 0)
       .setDepth(2);
-    this.add
-      .text(CENTER_X, midY + 160 * S, 'Tap, or press R, to play again', { fontSize: fs(15), color: '#888888' })
-      .setOrigin(0.5, 0)
-      .setDepth(2);
 
-    this.input.once('pointerdown', () => this.scene.restart());
+    const showBoard = async (): Promise<void> => {
+      const top = await fetchTopScores(10, 'timeattack');
+      if (!listText.scene) return; // restarted while the request was in flight
+      listText.setText(
+        top.length
+          ? top.map((r: TopScore, i: number) => `${i + 1}. ${r.name} - ${r.score}`).join('\n')
+          : 'No scores yet - be the first!'
+      );
+      listText.setColor('#ffffff');
+    };
+    void showBoard();
+
+    let saving = false;
+    saveBtn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+      event.stopPropagation();
+      if (saving) return;
+      saving = true;
+      saveLabel.setText('Saving...');
+      void submitScore({ name, score: this.score, durationMs, mode: 'timeattack' }).then((ok) => {
+        if (!saveLabel.scene) return;
+        if (!ok) {
+          saveLabel.setText('Save failed - tap to try again');
+          saving = false;
+          return;
+        }
+        saveLabel.setText(`Saved as ${name}`);
+        saveBtn.disableInteractive();
+        void showBoard();
+      });
+    });
+
+    // An explicit button, not a tap anywhere: a stray tap next to Save must not throw the
+    // round away before it has been saved.
+    const againBtn = this.add
+      .rectangle(CENTER_X, midY + 150 * S, btnW, btnH, 0xffffff, 0.08)
+      .setOrigin(0.5, 0)
+      .setDepth(2)
+      .setStrokeStyle(1, 0xffd54f, 0.5)
+      .setInteractive({ useHandCursor: true });
+    this.add
+      .text(CENTER_X, midY + 150 * S + btnH / 2, 'Play again', { fontSize: fs(17), color: '#ffffff' })
+      .setOrigin(0.5)
+      .setDepth(3);
+    againBtn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
+      event.stopPropagation();
+      this.scene.restart();
+    });
   }
 }

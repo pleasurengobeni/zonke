@@ -104,16 +104,33 @@ interface Timer {
   run: () => void;
 }
 
-function between(min: number, max: number): number {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
+/**
+ * Every random number a match makes comes from its own stream, never from Math.random.
+ *
+ * That is what makes an online game possible: two browsers running this engine from the
+ * same seed, fed the same shots in the same order, produce byte-identical matches - the
+ * same wall bounces, the same split, the same rows turning gold. Only the power of each
+ * shot has to cross the network; everything else is reproduced rather than transmitted.
+ */
+export type Rng = () => number;
 
-function floatBetween(min: number, max: number): number {
-  return min + Math.random() * (max - min);
+/** mulberry32 - small, fast, and identical in every JS engine. */
+export function seededRng(seed: number): Rng {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
 export class Match {
   readonly mode: EngineMode;
+  private readonly rng: Rng;
+  private readonly cpuPlays: boolean;
+  private readonly splitWindowTurns: number;
+  private splitTurnsLeft = 0;
   readonly players: [PlayerState, PlayerState];
   activeIndex: 0 | 1 = 0;
 
@@ -147,14 +164,32 @@ export class Match {
   constructor(
     mode: EngineMode,
     playerName: string,
-    private readonly listener: MatchListener = {}
+    private readonly listener: MatchListener = {},
+    options: { rng?: Rng; opponentName?: string; cpu?: boolean; splitWindowTurns?: number } = {}
   ) {
     this.mode = mode;
-    this.players = [createPlayer(playerName), createPlayer('CPU')];
+    this.rng = options.rng ?? Math.random;
+    // Online, player two is another person - nothing should be taking their turn for them.
+    this.cpuPlays = options.cpu ?? true;
+    // Two browsers cannot agree on a wall clock to the millisecond, and the green row's
+    // deadline has to be a thing both of them decide identically - so an online match
+    // measures that window in TURNS, which both sides count the same way, while a local
+    // match keeps the fifteen seconds.
+    this.splitWindowTurns = options.splitWindowTurns ?? 0;
+    this.players = [createPlayer(playerName), createPlayer(options.opponentName ?? 'CPU')];
     this.rowBullets = Array.from({ length: BOARD_ROWS }, () => [0, 0]);
     this.rowFigureParts = Array.from({ length: BOARD_ROWS }, () => [0, 0]);
     this.pickBonusRow();
     this.armBall();
+  }
+
+  /** Both helpers draw from this match's own stream, never from Math.random. */
+  private between(min: number, max: number): number {
+    return Math.floor(this.rng() * (max - min + 1)) + min;
+  }
+
+  private floatBetween(min: number, max: number): number {
+    return min + this.rng() * (max - min);
   }
 
   get durationMs(): number {
@@ -162,7 +197,37 @@ export class Match {
   }
 
   get isCpuTurn(): boolean {
-    return this.activeIndex === 1;
+    return this.cpuPlays && this.activeIndex === 1;
+  }
+
+  /** Whether a shot can be taken right now - the online controller gates on this. */
+  get canShoot(): boolean {
+    return this.phase === 'ready';
+  }
+
+  /**
+   * Fires a shot of a given power, whoever it came from. Online, both players' shots
+   * arrive this way - the local one straight from the release, the remote one from the
+   * network - so the two engines consume their random streams in the same order.
+   */
+  fireShot(power: number): boolean {
+    if (this.phase !== 'ready') return false;
+    this.launch(power);
+    return true;
+  }
+
+  /**
+   * The power a charge of this many milliseconds would produce, jitter included.
+   *
+   * The jitter deliberately does NOT come from the match's shared stream: only the shooter
+   * calls this, so drawing from the shared stream would advance one player's sequence and
+   * not the other's, and the two boards would quietly drift apart. The number this returns
+   * is sent over the wire anyway, so its randomness has no one to agree with.
+   */
+  powerForHold(heldMs: number): number {
+    const base = Math.min(POWER_MAX, (heldMs / this.mode.chargeMs) * POWER_MAX);
+    const jitter = (Math.random() * 2 - 1) * this.mode.jitter;
+    return Math.max(0, Math.min(POWER_MAX, base + jitter));
   }
 
   /** The charge held so far, 0..POWER_MAX - for a view that wants to show it. */
@@ -200,7 +265,7 @@ export class Match {
 
   release(): void {
     if (this.phase !== 'charging') return;
-    const power = this.charge + floatBetween(-this.mode.jitter, this.mode.jitter);
+    const power = this.charge + this.floatBetween(-this.mode.jitter, this.mode.jitter);
     this.phase = 'ready';
     this.launch(power);
   }
@@ -265,15 +330,31 @@ export class Match {
     if (this.isCpuTurn) this.after(500, () => this.takeCpuTurn());
   }
 
+  /** A snapshot of everything two engines must agree on, for the desync check. */
+  stateDigest(): string {
+    return JSON.stringify({
+      active: this.activeIndex,
+      phase: this.phase,
+      kills: this.players.map((p) => p.kills),
+      dead: this.players.map((p) => p.deadRows.join('')),
+      parts: this.rowFigureParts,
+      bullets: this.rowBullets,
+      bonus: this.bonusRow,
+      lifeline: this.lifelineRow,
+      split: this.splitRow,
+      balls: this.balls.map((b) => [b.x.toFixed(6), b.y.toFixed(6), b.resting]),
+    });
+  }
+
   /** The CPU goes for the jackpot, missing by however much its mode allows. */
   private takeCpuTurn(): void {
     if (this.phase !== 'ready') return;
     const low = APEX_FLOOR / APEX_SPAN;
     const high = (APEX_FLOOR - this.wallY) / APEX_SPAN;
     const target = (low + high) / 2;
-    const goesForIt = Math.random() < this.mode.cpuAim;
-    const drift = ((Math.random() + Math.random() + Math.random() - 1.5) / 1.5) * this.mode.cpuError * POWER_MAX;
-    const power = goesForIt ? target + drift : floatBetween(0, POWER_MAX);
+    const goesForIt = this.rng() < this.mode.cpuAim;
+    const drift = ((this.rng() + this.rng() + this.rng() - 1.5) / 1.5) * this.mode.cpuError * POWER_MAX;
+    const power = goesForIt ? target + drift : this.floatBetween(0, POWER_MAX);
     this.listener.onMessage?.('CPU is lining up a shot...');
     this.after(600, () => this.launch(power));
   }
@@ -329,7 +410,7 @@ export class Match {
     if (ball.y < this.wallY) {
       ball.y = this.wallY;
       const bounced = Math.hypot(ball.vx, ball.vy) * WALL_BOUNCE;
-      const angle = floatBetween(-BOUNCE_SPREAD, BOUNCE_SPREAD);
+      const angle = this.floatBetween(-BOUNCE_SPREAD, BOUNCE_SPREAD);
       ball.vx = bounced * Math.sin(angle);
       ball.vy = bounced * Math.cos(angle);
       ball.hitWall = true;
@@ -363,10 +444,10 @@ export class Match {
   /** The green row's payoff: 2-5 balls, each with its own random speed and heading. */
   private splitBall(origin: Ball, slot: number): void {
     this.splitUsedThisTurn = true;
-    const count = between(SPLIT_MIN_BALLS, SPLIT_MAX_BALLS);
+    const count = this.between(SPLIT_MIN_BALLS, SPLIT_MAX_BALLS);
     for (let i = 0; i < count; i++) {
-      const angle = floatBetween(-2.2, 2.2); // fanned around straight up
-      const distance = APEX_SPAN * floatBetween(0.15, 1);
+      const angle = this.floatBetween(-2.2, 2.2); // fanned around straight up
+      const distance = APEX_SPAN * this.floatBetween(0.15, 1);
       const speed = Math.sqrt(2 * FRICTION * distance);
       this.balls.push({
         id: this.nextBallId++,
@@ -532,10 +613,10 @@ export class Match {
   private pickBonusRow(): void {
     let next = this.bonusRow;
     do {
-      next = between(0, BOARD_ROWS - 1);
+      next = this.between(0, BOARD_ROWS - 1);
     } while (next === this.bonusRow || next === this.lifelineRow || next === this.splitRow);
     this.bonusRow = next;
-    this.bonusTurnsLeft = between(3, 6);
+    this.bonusTurnsLeft = this.between(3, 6);
     this.listener.onSpecialRowsChanged?.();
   }
 
@@ -549,10 +630,10 @@ export class Match {
     if (this.lifelineRow !== null) return;
     let next: number;
     do {
-      next = between(0, BOARD_ROWS - 1);
+      next = this.between(0, BOARD_ROWS - 1);
     } while (next === this.bonusRow || next === this.splitRow);
     this.lifelineRow = next;
-    this.lifelineMultiplier = between(2, 3);
+    this.lifelineMultiplier = this.between(2, 3);
     this.listener.onSpecialRowsChanged?.();
   }
 
@@ -570,21 +651,31 @@ export class Match {
       this.closeSplitRow();
       return;
     }
-    if (this.splitRow !== null) return;
+    if (this.splitRow !== null) {
+      if (this.splitWindowTurns > 0) {
+        this.splitTurnsLeft -= 1;
+        this.splitSecondsLeft = this.splitTurnsLeft;
+        if (this.splitTurnsLeft <= 0) this.closeSplitRow();
+      }
+      return;
+    }
     if (this.splitSeenThisGame) return;
-    if (Math.random() >= SPLIT_SPAWN_CHANCE) return;
+    if (this.rng() >= SPLIT_SPAWN_CHANCE) return;
 
     let next: number;
     do {
-      next = between(0, BOARD_ROWS - 1);
+      next = this.between(0, BOARD_ROWS - 1);
     } while (next === this.bonusRow || next === this.lifelineRow);
     this.splitRow = next;
     this.splitSeenThisGame = true;
     this.splitExpiresAt = this.elapsedMs + SPLIT_WINDOW_MS;
-    this.splitSecondsLeft = SPLIT_WINDOW_MS / 1000;
+    this.splitTurnsLeft = this.splitWindowTurns;
+    this.splitSecondsLeft = this.splitWindowTurns > 0 ? this.splitWindowTurns : SPLIT_WINDOW_MS / 1000;
     this.listener.onSpecialRowsChanged?.();
     this.listener.onMessage?.(
-      `A GREEN SPLIT ROW opened on row ${rowLabel(next)} - ${SPLIT_WINDOW_MS / 1000} seconds to land on it!`
+      this.splitWindowTurns > 0
+        ? `A GREEN SPLIT ROW opened on row ${rowLabel(next)} - ${this.splitWindowTurns} turns to land on it!`
+        : `A GREEN SPLIT ROW opened on row ${rowLabel(next)} - ${SPLIT_WINDOW_MS / 1000} seconds to land on it!`
     );
   }
 
@@ -595,6 +686,7 @@ export class Match {
    */
   private tickSplitWindow(dt: number): void {
     if (this.splitRow === null) return;
+    if (this.splitWindowTurns > 0) return; // counted in turns instead - see the constructor
     if (this.phase === 'flying' || this.phase === 'charging' || this.phase === 'resolving') {
       // Genuinely held, not merely unchecked: the deadline moves with the clock, so a long
       // flight or a slow charge costs the player none of their fifteen seconds.
@@ -613,6 +705,7 @@ export class Match {
     if (this.splitRow === null) return;
     this.splitRow = null;
     this.splitSecondsLeft = 0;
+    this.splitTurnsLeft = 0;
     this.listener.onSpecialRowsChanged?.();
   }
 }

@@ -50,7 +50,8 @@ function bootPhaser(): Phaser.Game {
 //   ?r3d=table  the full 3D table: the whole board rebuilt as a tilted surface. Parked.
 //
 // Both load dynamically, so Three.js costs nothing to anyone who does not ask for it.
-const renderer3d = new URLSearchParams(location.search).get('r3d');
+const params = new URLSearchParams(location.search);
+const renderer3d = params.get('r3d');
 if (renderer3d === 'table') {
   track('renderer_3d', { variant: 'table' });
   void import('./three/main3d').then((m) => m.start3D());
@@ -60,5 +61,7 @@ if (renderer3d === 'table') {
   const game = bootPhaser();
   void import('./three/actors').then((m) => m.attach3DActors(game));
 } else {
-  bootPhaser();
+  const game = bootPhaser();
+  // ?online=1 goes straight to the waiting room; the mode picker gets there too.
+  if (params.has('online')) void import('./online/online').then((m) => m.startOnline(game));
 }

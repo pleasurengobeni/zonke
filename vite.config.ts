@@ -9,6 +9,9 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:4000',
         changeOrigin: true,
+        // The lobby is a WebSocket at /api/ws; without this the dev server would only
+        // proxy the REST calls and online play would work in production but not locally.
+        ws: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },
     },

@@ -40,5 +40,16 @@ git pull
 docker compose up -d --build
 ```
 
+### When the host vhost changes
+
+`services/web/nginx.host.conf` is the **host** nginx config, not the container's, so
+`docker compose up -d --build` does not pick it up. After a change to that file (the
+WebSocket lobby needed one), also:
+
+```bash
+cp /opt/zonkegame/services/web/nginx.host.conf /etc/nginx/sites-available/zonkegame.co.za
+nginx -t && systemctl reload nginx
+```
+
 Certificate renewal is handled by the host's existing `certbot.timer` — the
 same one renewing every other site's certs, not a per-app cron job.

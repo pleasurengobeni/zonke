@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "test:layout": "node scripts/check-layout.mjs",
     "test:features": "node scripts/check-features.mjs",
-    "test:3d": "node scripts/check-3d.mjs"
+    "test:3d": "node scripts/check-3d.mjs",
+    "test:saves": "node scripts/check-saves.mjs",
+    "test:engine": "node scripts/check-engine.mjs",
+    "test:online": "node scripts/check-online.mjs"
   },
   "devDependencies": {
     "@types/three": "^0.169.0",

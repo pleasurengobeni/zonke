@@ -428,7 +428,10 @@ for (const [label, w, h] of sizes) {
   await page.screenshot({ path: `${OUT}/timeattack.png` });
   console.log('  time attack: over=' + ta.over + ' prompted=' + ta.prompted);
   if (ta.prompted) fail('Time Attack asked for a name again');
-  if (!ta.texts.some((t) => t.includes('Saved as Thandi'))) fail(`no save confirmation: ${JSON.stringify(ta.texts)}`);
+  // The round must NOT have saved itself - it offers a button instead. Whether that button
+  // works is check-saves.mjs's job; here it only has to be on screen and unpressed.
+  if (ta.texts.some((t) => /Saved as/.test(t))) fail('the round saved itself without being asked');
+  if (!ta.texts.some((t) => /Save my score/.test(t))) fail('no save button on the Time Attack results');
   if (!ta.texts.some((t) => /1\. \w+ - \d+/.test(t))) fail('no leaderboard on the Time Attack results');
 
   if (errors.length) fail('console errors: ' + errors.join(' | '));

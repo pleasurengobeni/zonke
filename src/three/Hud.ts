@@ -159,11 +159,15 @@ export class Hud {
       title.style.color = playerWon ? '#ffd54f' : '#ff8a65';
       const stats = el('div', 'hud-stats', `Kills  ${kills[0]} - ${kills[1]}      Time  ${formatClock(durationMs)}`);
       const board = el('div', 'hud-board');
-      const save = el('button', 'hud-btn green', `Save my score - ${kills[0]} kills in ${formatClock(durationMs)}`);
+      // Only a win can go on a fastest-wins board, so a loss is not offered the button.
+      const save = playerWon
+        ? el('button', 'hud-btn green', `Save my score - ${kills[0]} kills in ${formatClock(durationMs)}`)
+        : null;
       const again = el('button', 'hud-btn', 'Play again');
+      if (!save) void fastestWinsBoard().then((text) => { if (board.isConnected) board.textContent = text; });
 
       let saving = false;
-      save.addEventListener('click', async () => {
+      save?.addEventListener('click', async () => {
         if (saving) return;
         saving = true;
         save.textContent = 'Saving...';
@@ -180,7 +184,9 @@ export class Hud {
       });
       again.addEventListener('click', () => this.callbacks.onPlayAgain());
 
-      card.append(title, Object.assign(el('p', ''), { textContent: reason }), stats, save, again, board);
+      card.append(title, Object.assign(el('p', ''), { textContent: reason }), stats);
+      if (save) card.append(save);
+      card.append(again, board);
     });
   }
 }
