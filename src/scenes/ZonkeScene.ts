@@ -545,7 +545,9 @@ export class ZonkeScene extends Phaser.Scene {
   ): TurnOutcome {
     const slots =
       result === 'ZONKE' ? Array.from({ length: MAX_VISIBLE_ROWS }, (_row, i) => i) : [slot];
-    const live = slots.filter((row) => !opponent.deadRows[row]);
+    // A downed row is disabled for both sides: the owner can no longer build or fire from
+    // it, and there is nothing left to shoot at across from it.
+    const live = slots.filter((row) => !opponent.deadRows[row] && !active.deadRows[row]);
 
     if (live.length === 0) {
       return {
@@ -564,7 +566,13 @@ export class ZonkeScene extends Phaser.Scene {
         drew += 1;
         return;
       }
-      const outcome = advanceBullet(active, opponent, row, this.rowBullets[row][playerIndex]);
+      const outcome = advanceBullet(
+        active,
+        opponent,
+        row,
+        this.rowBullets[row][playerIndex],
+        playerIndex
+      );
       this.rowBullets[row][playerIndex] = Math.min(
         BULLET_STEPS,
         this.rowBullets[row][playerIndex] + 1
@@ -614,13 +622,15 @@ export class ZonkeScene extends Phaser.Scene {
       })
     );
 
-    // A row that has been shot shows the hit on the far side from whoever fired.
+    // A row that has been shot gets its figure crossed out in red on the side that lost it.
     this.players.forEach((p, i) =>
       p.deadRows.forEach((dead, slot) => {
         if (!dead) return;
-        const shooterSub = (1 - i) as 0 | 1;
-        const endCol = shooterSub === 0 ? ROWS.length - 1 : 0;
-        this.cellTextPool[slot][i][endCol].setText('X').setColor(KILL_COLOR);
+        const x = i === 0 ? 85 : 715;
+        const y = LOG_TOP + slot * ROW_H + i * SUB_H + SUB_H / 2;
+        this.bulletGfx.lineStyle(3, 0xff5252, 0.95);
+        this.bulletGfx.lineBetween(x - 15, y - 16, x + 15, y + 16);
+        this.bulletGfx.lineBetween(x + 15, y - 16, x - 15, y + 16);
       })
     );
 
