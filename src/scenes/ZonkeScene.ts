@@ -19,9 +19,27 @@ const FRICTION = 0.21; // speed scrubbed off every 16ms frame
 const STOP_SPEED = 0.35; // below this the ball has come to rest
 const WALL_BOUNCE = 0.85; // energy kept bouncing off a wall (sides, and the one above ZONKE)
 const BOUNCE_SPREAD = 1.0; // how wide the wall can kick the ball off (radians either side)
-const CHARGE_MS = 1900; // hold time to fill the power bar from nothing to maximum
 const POWER_MAX = 1.55; // 1.0 reaches row 10; past that is the ZONKE band, then the wall
 const BALL_R = 8;
+
+
+interface Mode {
+  name: string;
+  wallY: number; // the wall sits lower in harder modes, leaving a thinner ZONKE band
+  chargeMs: number; // a faster bar makes that band a shorter moment in real time
+  jitter: number; // random power the shot picks up on release
+  cpuAim: number; // how often the CPU actually goes for the jackpot
+  cpuError: number; // how far its aim drifts when it does
+}
+
+// Two levers make ZONKE harder: the wall drops so there is less room to stop in above row
+// 10, and the bar charges faster so that room passes sooner. Measured windows are roughly
+// 365ms of a 1900ms charge on Easy, 156ms of 1300ms on Moderate, 65ms of 1000ms on Hard.
+const MODES: Mode[] = [
+  { name: 'Easy', wallY: 103, chargeMs: 1900, jitter: 0, cpuAim: 0.1, cpuError: 0.6 },
+  { name: 'Moderate', wallY: 125, chargeMs: 1300, jitter: 0.04, cpuAim: 0.45, cpuError: 0.18 },
+  { name: 'Hard', wallY: 138, chargeMs: 1000, jitter: 0.08, cpuAim: 0.75, cpuError: 0.06 },
+];
 
 const P1_COLOR = '#4caf50';
 const P2_COLOR = '#2196f3';
@@ -39,7 +57,6 @@ const SUB_H = ROW_H / 2;
 const MAX_VISIBLE_ROWS = 10;
 const LOG_TOP = HEADER_TOP + HEADER_H;
 const TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
-const TOP_WALL_Y = HEADER_TOP + BALL_R; // the line above ZONKE - the only thing that bounces it back
 
 // Power maps straight onto height: 0 barely clears row 1, 1.0 puts the apex in the ZONKE
 // band, and anything past that drives the ball into the top line.
@@ -88,13 +105,20 @@ export class ZonkeScene extends Phaser.Scene {
   private ballVy = 0;
   private hitWall = false; // over-powered: bounced off the wall above ZONKE
   private gameOver = false;
+  private mode: Mode | null = null; // null while the difficulty is still being chosen
+  private modeUi: Phaser.GameObjects.GameObject[] = [];
+  private bulletGfx!: Phaser.GameObjects.Graphics;
 
   constructor() {
     super('ZonkeScene');
   }
 
+  init(data: { mode?: Mode }): void {
+    this.mode = data?.mode ?? null;
+  }
+
   create(): void {
-    this.players = [createPlayer('Player 1'), createPlayer('Player 2')];
+    this.players = [createPlayer('Player 1'), createPlayer('CPU')];
     this.activeIndex = 0;
     this.resetBoardMarks();
     this.gameOver = false;
@@ -104,7 +128,7 @@ export class ZonkeScene extends Phaser.Scene {
       .setOrigin(0.5, 0);
 
     this.add.text(85, 40, 'Player 1', { fontSize: '15px', color: P1_COLOR }).setOrigin(0.5, 0);
-    this.add.text(715, 40, 'Player 2', { fontSize: '15px', color: P2_COLOR }).setOrigin(0.5, 0);
+    this.add.text(715, 40, 'CPU', { fontSize: '15px', color: P2_COLOR }).setOrigin(0.5, 0);
 
     this.killTexts = [
       this.add.text(85, 58, 'Kills: 0', { fontSize: '12px', color: '#ffd54f' }).setOrigin(0.5, 0),
@@ -148,11 +172,53 @@ export class ZonkeScene extends Phaser.Scene {
       .setOrigin(0.5, 0)
       .setVisible(false);
 
+    this.bulletGfx = this.add.graphics();
+
     this.input.keyboard!.on('keydown-SPACE', this.onChargeStart, this);
     this.input.keyboard!.on('keyup-SPACE', this.onRelease, this);
     this.input.keyboard!.on('keydown-R', this.restartGame, this);
 
+    this.input.keyboard!.on('keydown-ONE', () => this.chooseMode(0), this);
+    this.input.keyboard!.on('keydown-TWO', () => this.chooseMode(1), this);
+    this.input.keyboard!.on('keydown-THREE', () => this.chooseMode(2), this);
+
     this.redrawAll();
+
+    if (this.mode) {
+      this.armBall();
+    } else {
+      this.showModePicker();
+    }
+  }
+
+  private showModePicker(): void {
+    const panel = this.add.rectangle(400, 415, 460, 210, 0x000000, 0.82).setOrigin(0.5);
+    const title = this.add
+      .text(400, 335, 'Choose difficulty', { fontSize: '22px', color: '#ffffff', fontStyle: 'bold' })
+      .setOrigin(0.5, 0);
+    const lines = MODES.map((m, i) =>
+      this.add
+        .text(400, 380 + i * 34, `${i + 1}   ${m.name}`, { fontSize: '18px', color: '#ffd54f' })
+        .setOrigin(0.5, 0)
+    );
+    const hint = this.add
+      .text(400, 490, 'Harder modes charge faster and the CPU aims better', {
+        fontSize: '12px',
+        color: '#aaaaaa',
+      })
+      .setOrigin(0.5, 0);
+    this.modeUi = [panel, title, hint, ...lines];
+    this.turnText.setText('');
+    this.messageText.setText('');
+  }
+
+  private chooseMode(index: number): void {
+    if (this.mode) return;
+    this.mode = MODES[index];
+    this.modeUi.forEach((o) => o.destroy());
+    this.modeUi = [];
+    this.turnText.setText("Player 1's turn");
+    this.messageText.setText('Hold SPACE to charge, release to launch');
     this.armBall();
   }
 
@@ -251,6 +317,9 @@ export class ZonkeScene extends Phaser.Scene {
     this.hitWall = false;
     this.positionBallAtRest();
     this.columnHighlight.setVisible(false);
+    if (this.isCpuTurn() && !this.gameOver && this.mode) {
+      this.time.delayedCall(500, () => this.takeCpuTurn());
+    }
   }
 
   /** Where a given power brings the ball to rest - this IS the row/ZONKE mapping. */
@@ -259,6 +328,7 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   private onChargeStart(): void {
+    if (!this.mode || this.isCpuTurn()) return;
     if (this.gameOver || this.flying || this.charging || !this.ready) return;
     this.charging = true;
     this.power = 0;
@@ -269,6 +339,40 @@ export class ZonkeScene extends Phaser.Scene {
   private onRelease(): void {
     if (!this.charging) return;
     this.charging = false;
+    // Harder modes add a little slop, so the same hold does not always go the same distance.
+    const jitter = Phaser.Math.FloatBetween(-this.mode!.jitter, this.mode!.jitter);
+    this.launchWithPower(this.power + jitter);
+  }
+
+  private isCpuTurn(): boolean {
+    return this.activeIndex === 1;
+  }
+
+  /** The CPU goes for the jackpot, missing by however much its mode allows. */
+  private takeCpuTurn(): void {
+    if (this.gameOver || !this.ready || !this.mode) return;
+    // The band moves with the wall, so the CPU has to aim at this mode's band, not a fixed
+    // spot - otherwise a lower wall would make it worse rather than better.
+    const low = (APEX_FLOOR_Y - LOG_TOP) / APEX_SPAN;
+    const high = (APEX_FLOOR_Y - this.mode.wallY) / APEX_SPAN;
+    const target = (low + high) / 2;
+    // On easier modes it mostly just takes a shot; on Hard it nearly always goes for ZONKE.
+    const goesForIt = Math.random() < this.mode.cpuAim;
+    // Sum of three uniforms - clusters near the target, with the odd wild miss.
+    const drift =
+      ((Math.random() + Math.random() + Math.random() - 1.5) / 1.5) *
+      this.mode.cpuError *
+      POWER_MAX;
+    const power = goesForIt
+      ? target + drift
+      : Phaser.Math.FloatBetween(0, POWER_MAX);
+    this.messageText.setText('CPU is lining up a shot...');
+    this.time.delayedCall(600, () => this.launchWithPower(power));
+  }
+
+  private launchWithPower(power: number): void {
+    if (this.flying || !this.ready) return;
+    this.power = Phaser.Math.Clamp(power, 0, POWER_MAX);
     this.ready = false;
     this.flying = true;
     this.hitWall = false;
@@ -288,13 +392,13 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number): void {
-    if (this.gameOver) return;
+    if (this.gameOver || !this.mode) return;
 
     if (this.charging) {
       const held = this.time.now - this.chargeStart;
       // Deliberately no gauge: the player has to judge the hold by feel, which is what
       // keeps the ZONKE band hard to hit. The flight itself is the only feedback.
-      this.power = Math.min(POWER_MAX, (held / CHARGE_MS) * POWER_MAX);
+      this.power = Math.min(POWER_MAX, (held / this.mode!.chargeMs) * POWER_MAX);
       return;
     }
 
@@ -338,8 +442,9 @@ export class ZonkeScene extends Phaser.Scene {
 
     // The wall above ZONKE is the one thing that sends it back. Whatever momentum it still
     // had going up now carries it back down, so the harder you overshot, the lower you land.
-    if (this.ballY < TOP_WALL_Y) {
-      this.ballY = TOP_WALL_Y;
+    const wall = this.mode!.wallY;
+    if (this.ballY < wall) {
+      this.ballY = wall;
       // Coming off the wall is the only thing that sends the ball sideways: whatever
       // momentum it had left comes back down on a random angle.
       const speed = Math.hypot(this.ballVx, this.ballVy) * WALL_BOUNCE;
@@ -466,7 +571,7 @@ export class ZonkeScene extends Phaser.Scene {
 
   private restartGame(): void {
     if (!this.gameOver) return;
-    this.scene.restart();
+    this.scene.restart({ mode: this.mode });
   }
 
   private redrawAll(): void {
@@ -476,6 +581,7 @@ export class ZonkeScene extends Phaser.Scene {
 
     this.cellTextPool.forEach((row) => row.forEach((sub) => sub.forEach((t) => t.setText(''))));
     this.miniFigureGfx.forEach((row) => row.forEach((g) => g.clear()));
+    this.bulletGfx.clear();
 
     // Every mark stays in the cell its ball landed in, so the board fills up as it is played.
     this.boardMarks.forEach((row, slot) =>
@@ -505,20 +611,37 @@ export class ZonkeScene extends Phaser.Scene {
 
   private paintMark(slot: number, sub: 0 | 1, col: number, mark: CellMark): void {
     const t = this.cellTextPool[slot][sub][col];
-    const color = sub === 0 ? P1_COLOR : P2_COLOR;
 
     switch (mark.kind) {
       case 'bullet-loaded':
-        t.setText('-').setColor(color);
+        this.drawBulletTrack(slot, sub, col, sub === 0 ? P1_COLOR_HEX : P2_COLOR_HEX);
         break;
       case 'kill':
       case 'instant-hit':
+        this.drawBulletTrack(slot, sub, col, 0xff5252);
         t.setText('X').setColor(KILL_COLOR);
         break;
       case 'row-already-dead':
         t.setText('\u00B7').setColor(NEUTRAL_COLOR);
         break;
     }
+  }
+
+  /**
+   * A fired bullet is a single line leaving the shooter's own side of the board and running
+   * across their row towards the opponent, stopping at the column it reached.
+   */
+  private drawBulletTrack(slot: number, sub: 0 | 1, col: number, color: number): void {
+    const g = this.bulletGfx;
+    const y = LOG_TOP + slot * ROW_H + sub * SUB_H + SUB_H / 2;
+    const tip = GRID_LEFT + col * CELL_W + CELL_W / 2;
+    // Player 1 shoots left to right from column A; player 2 shoots back from column H.
+    const from = sub === 0 ? GRID_LEFT + 2 : GRID_LEFT + ROWS.length * CELL_W - 2;
+
+    g.lineStyle(2, color, 0.9);
+    g.lineBetween(from, y, tip, y);
+    g.fillStyle(color, 1);
+    g.fillCircle(tip, y, 3);
   }
 
   private drawMiniFigure(
