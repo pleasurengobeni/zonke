@@ -4,12 +4,13 @@ import {
   EDGE_ROWS,
   FIGURE_PARTS,
   createPlayer,
-  applyLaunch,
+  applyBullet,
   checkWin,
   type PlayerState,
   type LaunchResult,
   type Row,
   type TurnResultKind,
+  type TurnOutcome,
 } from '../zonke/GameState';
 
 // The ball is shot up the board and friction bleeds its momentum away until it stops -
@@ -508,8 +509,7 @@ export class ZonkeScene extends Phaser.Scene {
     const active = this.players[activeIndexAtLaunch];
     const opponent = this.players[1 - activeIndexAtLaunch];
 
-    const outcome = applyLaunch(active, opponent, result);
-    this.applyToBoard(activeIndexAtLaunch, result, outcome.kind, slot, col);
+    const outcome = this.applyToBoard(activeIndexAtLaunch, result, slot, col, active, opponent);
     this.messageText.setText(
       overCharged
         ? `Too much power - the wall threw it back. ${outcome.message}`
@@ -540,33 +540,61 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   /**
-   * A landing draws one of two things, never both: the next part of that row's shape while
-   * the player is still building, or a single dot for the bullet once they are shooting.
-   * A ZONKE pays that out on every row at once instead of only the row it stopped in.
+   * A row shoots only once its own figure is finished and holding a gun; until then a
+   * landing there draws that figure's next part instead. A ZONKE applies that to every row
+   * at once, so some rows may gain a part while the finished ones fire.
    */
   private applyToBoard(
     playerIndex: 0 | 1,
     result: LaunchResult,
-    kind: TurnResultKind,
     slot: number,
-    col: number
-  ): void {
-    const drawsShape = kind === 'part-drawn' || kind === 'figure-completed';
+    col: number,
+    active: PlayerState,
+    opponent: PlayerState
+  ): TurnOutcome {
     const slots =
-      result === 'ZONKE'
-        ? Array.from({ length: MAX_VISIBLE_ROWS }, (_row, i) => i)
-        : [slot];
+      result === 'ZONKE' ? Array.from({ length: MAX_VISIBLE_ROWS }, (_row, i) => i) : [slot];
 
-    slots.forEach((s) => {
-      if (drawsShape) {
-        this.rowFigureParts[s][playerIndex] = Math.min(
-          FIGURE_PARTS.length,
-          this.rowFigureParts[s][playerIndex] + 1
-        );
-      } else {
-        this.boardMarks[s][playerIndex][col] = { result, kind };
-      }
+    const armed = slots.filter(
+      (s) => this.rowFigureParts[s][playerIndex] >= FIGURE_PARTS.length
+    );
+    const building = slots.filter(
+      (s) => this.rowFigureParts[s][playerIndex] < FIGURE_PARTS.length
+    );
+
+    building.forEach((s) => {
+      this.rowFigureParts[s][playerIndex] += 1;
     });
+
+    // Only the rows already holding a gun shoot, and they fire once between them - bullets
+    // and downed columns are per column, so firing per row would cascade on a single turn.
+    if (armed.length > 0) {
+      const outcome = applyBullet(active, opponent, ROWS[col] as Row);
+      armed.forEach((s) => {
+        this.boardMarks[s][playerIndex][col] = { result, kind: outcome.kind };
+      });
+      if (building.length > 0) {
+        return {
+          ...outcome,
+          message: `${outcome.message} (+${building.length} row(s) drew a part)`,
+        };
+      }
+      return outcome;
+    }
+
+    const finished = building.filter(
+      (s) => this.rowFigureParts[s][playerIndex] === FIGURE_PARTS.length
+    ).length;
+    return {
+      kind: finished > 0 ? 'figure-completed' : 'part-drawn',
+      result,
+      message:
+        result === 'ZONKE'
+          ? `${active.name} hit ZONKE - every row drew its next part!`
+          : `${active.name} landed on row ${MAX_VISIBLE_ROWS - slot} - drew ${
+              FIGURE_PARTS[this.rowFigureParts[slot][playerIndex] - 1]
+            }`,
+    };
   }
 
   private restartGame(): void {

@@ -32,7 +32,6 @@ export type LaunchResult = Row | 'ZONKE';
 
 export interface PlayerState {
   name: string;
-  drawnParts: boolean[]; // length FIGURE_PARTS.length, true once that specific part has been drawn
   bullets: boolean[]; // length ROWS.length, bullet loaded on that row (aimed at opponent)
   deadRows: boolean[]; // length ROWS.length, true if THIS player was shot on that row
   kills: number;
@@ -56,77 +55,44 @@ export interface TurnOutcome {
 export function createPlayer(name: string): PlayerState {
   return {
     name,
-    drawnParts: FIGURE_PARTS.map(() => false),
     bullets: ROWS.map(() => false),
     deadRows: ROWS.map(() => false),
     kills: 0,
   };
 }
 
-export function isFigureComplete(p: PlayerState): boolean {
-  return p.drawnParts.every(Boolean);
-}
-
 export function rowIndex(row: Row): number {
   return ROWS.indexOf(row);
 }
 
-/** Applies a launch result to the active player. Mutates both player states. */
-export function applyLaunch(
+/**
+ * The shooting half of a turn, used only once a row's figure is finished and holding a gun.
+ * Which row did the shooting does not matter here - bullets and downed columns are tracked
+ * per column, across the whole board.
+ */
+export function applyBullet(
   active: PlayerState,
   opponent: PlayerState,
-  result: LaunchResult
+  column: Row
 ): TurnOutcome {
-  if (!isFigureComplete(active)) {
-    // --- Building phase --- every landing (any column, including ZONKE) draws the
-    // next part in a fixed sequence: head, spine, arm, arm, leg, leg, gun.
-    const partIndex = active.drawnParts.findIndex((drawn) => !drawn);
-    active.drawnParts[partIndex] = true;
-    const justCompleted = isFigureComplete(active);
-    return {
-      kind: justCompleted ? 'figure-completed' : 'part-drawn',
-      result,
-      message: justCompleted
-        ? `${active.name} landed on ${result} — figure complete!`
-        : `${active.name} landed on ${result} — drew ${FIGURE_PARTS[partIndex]}`,
-    };
-  }
-
-  // --- Bullet phase ---
-  if (result === 'ZONKE') {
-    let loaded = 0;
-    NORMAL_ROWS.forEach((row) => {
-      const i = rowIndex(row);
-      if (!active.bullets[i] && !opponent.deadRows[i]) {
-        active.bullets[i] = true;
-        loaded++;
-      }
-    });
-    return {
-      kind: 'bullet-loaded',
-      result,
-      message: `${active.name} rolled ZONKE — loaded ${loaded} bullet(s)!`,
-    };
-  }
-
-  const idx = rowIndex(result);
+  const idx = rowIndex(column);
 
   if (opponent.deadRows[idx]) {
     return {
       kind: 'row-already-dead',
-      result,
-      message: `Column ${result} on ${opponent.name} is already down — no effect.`,
+      result: column,
+      message: `Column ${column} on ${opponent.name} is already down - no effect.`,
     };
   }
 
-  if (EDGE_ROWS.includes(result)) {
+  if (EDGE_ROWS.includes(column)) {
     // Instant hit on the opponent, no pre-loaded bullet required.
     opponent.deadRows[idx] = true;
     active.kills += 1;
     return {
       kind: 'instant-hit',
-      result,
-      message: `${active.name} lands on edge column ${result} — instant hit on ${opponent.name}!`,
+      result: column,
+      message: `${active.name} lands on edge column ${column} - instant hit on ${opponent.name}!`,
     };
   }
 
@@ -135,16 +101,16 @@ export function applyLaunch(
     active.kills += 1;
     return {
       kind: 'kill',
-      result,
-      message: `${active.name} fires on column ${result} — ${opponent.name} is hit!`,
+      result: column,
+      message: `${active.name} fires on column ${column} - ${opponent.name} is hit!`,
     };
   }
 
   active.bullets[idx] = true;
   return {
     kind: 'bullet-loaded',
-    result,
-    message: `${active.name} loads a bullet on column ${result}.`,
+    result: column,
+    message: `${active.name} loads a bullet on column ${column}.`,
   };
 }
 
