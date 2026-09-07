@@ -1,21 +1,11 @@
 export const ROWS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'] as const;
 export type Row = (typeof ROWS)[number];
 
-/** Numeric label shown alongside each letter, matching the original "2-9" description. */
-export const ROW_NUMBERS: Record<Row, number> = {
-  A: 2,
-  B: 3,
-  C: 4,
-  D: 5,
-  E: 6,
-  F: 7,
-  G: 8,
-  H: 9,
-};
+/** Board rows, numbered 1 at the bottom up to BOARD_ROWS at the top. */
+export const BOARD_ROWS = 10;
 
-/** Edge columns are instant-hit columns; the rest use the load-then-kill bullet mechanic. */
-export const EDGE_ROWS: Row[] = ['A', 'H'];
-export const NORMAL_ROWS: Row[] = ['B', 'C', 'D', 'E', 'F', 'G'];
+/** A bullet steps one letter per landing; once it passes H it reaches the other side. */
+export const BULLET_STEPS = ROWS.length;
 
 export const FIGURE_PARTS = [
   'head',
@@ -32,17 +22,14 @@ export type LaunchResult = Row | 'ZONKE';
 
 export interface PlayerState {
   name: string;
-  bullets: boolean[]; // length ROWS.length, bullet loaded on that row (aimed at opponent)
-  deadRows: boolean[]; // length ROWS.length, true if THIS player was shot on that row
+  deadRows: boolean[]; // length BOARD_ROWS, true once THIS player's row has been shot
   kills: number;
 }
 
 export type TurnResultKind =
   | 'part-drawn'
   | 'figure-completed'
-  | 'part-already-drawn'
-  | 'bullet-loaded'
-  | 'instant-hit'
+  | 'bullet-advanced'
   | 'kill'
   | 'row-already-dead';
 
@@ -55,62 +42,43 @@ export interface TurnOutcome {
 export function createPlayer(name: string): PlayerState {
   return {
     name,
-    bullets: ROWS.map(() => false),
-    deadRows: ROWS.map(() => false),
+    deadRows: Array.from({ length: BOARD_ROWS }, () => false),
     kills: 0,
   };
 }
 
-export function rowIndex(row: Row): number {
-  return ROWS.indexOf(row);
+/** Row slot 0 is the top row, drawn as row BOARD_ROWS on the board. */
+export function rowLabel(slot: number): number {
+  return BOARD_ROWS - slot;
 }
 
 /**
- * The shooting half of a turn, used only once a row's figure is finished and holding a gun.
- * Which row did the shooting does not matter here - bullets and downed columns are tracked
- * per column, across the whole board.
+ * A finished figure fires by stepping its bullet one letter further across its row. The
+ * shot only counts when the bullet clears H and reaches the other side.
  */
-export function applyBullet(
+export function advanceBullet(
   active: PlayerState,
   opponent: PlayerState,
-  column: Row
+  slot: number,
+  stepsSoFar: number
 ): TurnOutcome {
-  const idx = rowIndex(column);
+  const steps = stepsSoFar + 1;
+  const label = rowLabel(slot);
 
-  if (opponent.deadRows[idx]) {
-    return {
-      kind: 'row-already-dead',
-      result: column,
-      message: `Column ${column} on ${opponent.name} is already down - no effect.`,
-    };
-  }
-
-  if (EDGE_ROWS.includes(column)) {
-    // Instant hit on the opponent, no pre-loaded bullet required.
-    opponent.deadRows[idx] = true;
-    active.kills += 1;
-    return {
-      kind: 'instant-hit',
-      result: column,
-      message: `${active.name} lands on edge column ${column} - instant hit on ${opponent.name}!`,
-    };
-  }
-
-  if (active.bullets[idx]) {
-    opponent.deadRows[idx] = true;
+  if (steps >= BULLET_STEPS) {
+    opponent.deadRows[slot] = true;
     active.kills += 1;
     return {
       kind: 'kill',
-      result: column,
-      message: `${active.name} fires on column ${column} - ${opponent.name} is hit!`,
+      result: ROWS[ROWS.length - 1],
+      message: `${active.name}'s bullet clears H on row ${label} - ${opponent.name} is hit!`,
     };
   }
 
-  active.bullets[idx] = true;
   return {
-    kind: 'bullet-loaded',
-    result: column,
-    message: `${active.name} loads a bullet on column ${column}.`,
+    kind: 'bullet-advanced',
+    result: ROWS[steps],
+    message: `${active.name}'s bullet on row ${label} reaches ${ROWS[steps]}.`,
   };
 }
 
@@ -120,28 +88,22 @@ export interface WinCheck {
   reason?: string;
 }
 
-/** Checks whether the game has been decided (kill race with early-out). */
+/** Decided when one side has no rows left standing, or the lead can no longer be caught. */
 export function checkWin(p1: PlayerState, p2: PlayerState): WinCheck {
-  const p1Kills = p1.kills;
-  const p2Kills = p2.kills;
-  const p1AliveRows = p1.deadRows.filter((d) => !d).length; // rows p1 can still lose (p2 can still kill)
-  const p2AliveRows = p2.deadRows.filter((d) => !d).length; // rows p2 can still lose (p1 can still kill)
+  const p1Alive = p1.deadRows.filter((d) => !d).length;
+  const p2Alive = p2.deadRows.filter((d) => !d).length;
 
-  const p1MaxPossible = p1Kills + p2AliveRows; // p1's kills come from p2's rows
-  const p2MaxPossible = p2Kills + p1AliveRows;
-
-  if (p1Kills > p2MaxPossible) {
-    return { gameOver: true, winner: p1, reason: `${p1.name} cannot be caught — wins!` };
+  if (p1Alive === 0) {
+    return { gameOver: true, winner: p2, reason: `${p2.name} shot every row down - wins!` };
   }
-  if (p2Kills > p1MaxPossible) {
-    return { gameOver: true, winner: p2, reason: `${p2.name} cannot be caught — wins!` };
+  if (p2Alive === 0) {
+    return { gameOver: true, winner: p1, reason: `${p1.name} shot every row down - wins!` };
   }
-  if (p1AliveRows === 0 && p2AliveRows === 0) {
-    if (p1Kills === p2Kills) {
-      return { gameOver: true, reason: 'All rows down — tie game!' };
-    }
-    const winner = p1Kills > p2Kills ? p1 : p2;
-    return { gameOver: true, winner, reason: `${winner.name} wins on kill count!` };
+  if (p1.kills > p2.kills + p1Alive) {
+    return { gameOver: true, winner: p1, reason: `${p1.name} cannot be caught - wins!` };
+  }
+  if (p2.kills > p1.kills + p2Alive) {
+    return { gameOver: true, winner: p2, reason: `${p2.name} cannot be caught - wins!` };
   }
   return { gameOver: false };
 }
