@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>Zonke</title>
     <style>
       html,
@@ -10,14 +10,27 @@
         margin: 0;
         padding: 0;
         background: #1d1d1d;
-        height: 100%;
+        overscroll-behavior: none;
+        touch-action: none;
+      }
+      /* iOS Safari's address/tab bars come and go, so 100vh (the layout viewport with
+         chrome collapsed) overshoots the real visible area and the flex-centered canvas
+         gets pushed down, off the bottom of the screen. 100dvh tracks the visible area as
+         the chrome shows/hides; the --vh custom property below is a JS fallback for
+         browsers that don't support dvh yet. */
+      html {
+        height: -webkit-fill-available;
+      }
+      body {
+        height: 100vh;
+        height: 100dvh;
+        height: calc(var(--vh, 1vh) * 100);
         overflow: hidden;
       }
-      /* Give Phaser a box that always matches the window, so FIT has a real target to
-         scale the board into and re-fits whenever the window changes. */
       #app {
         width: 100vw;
-        height: 100vh;
+        width: 100dvw;
+        height: 100%;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -25,11 +38,25 @@
       }
       #app canvas {
         display: block;
+        touch-action: none;
       }
     </style>
   </head>
   <body>
     <div id="app"></div>
+    <script>
+      // JS fallback for browsers without dvh support: mirrors the real visible height
+      // into a CSS variable and keeps it current as Safari's chrome shows or hides.
+      function setVh() {
+        document.documentElement.style.setProperty('--vh', window.innerHeight * 0.01 + 'px');
+      }
+      setVh();
+      window.addEventListener('resize', setVh);
+      window.addEventListener('orientationchange', setVh);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', setVh);
+      }
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
