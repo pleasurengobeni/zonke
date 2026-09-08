@@ -2,20 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Zonke</title>
     <style>
-      html, body {
+      html,
+      body {
         margin: 0;
         padding: 0;
         background: #1d1d1d;
-        display: flex;
-        justify-content: center;
-        align-items: center;
         height: 100%;
+        overflow: hidden;
       }
+      /* Give Phaser a box that always matches the window, so FIT has a real target to
+         scale the board into and re-fits whenever the window changes. */
       #app {
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
         line-height: 0;
+      }
+      #app canvas {
+        display: block;
       }
     </style>
   </head>

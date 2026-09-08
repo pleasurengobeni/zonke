@@ -4,8 +4,8 @@ import { ZonkeScene } from './scenes/ZonkeScene';
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
   parent: 'app',
-  width: 900,
-  height: 940,
+  width: 1500,
+  height: 1160,
   backgroundColor: '#2d2d2d',
   scale: {
     mode: Phaser.Scale.FIT,
