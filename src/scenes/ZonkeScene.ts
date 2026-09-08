@@ -16,12 +16,16 @@ import {
 // The ball is shot up the board and friction bleeds its momentum away until it stops -
 // wherever it comes to rest IS the result. It never falls back down; the only thing that
 // turns it around is the wall above the ZONKE row.
-const FRICTION = 0.3; // speed scrubbed off every 16ms frame
-const STOP_SPEED = 0.35; // below this the ball has come to rest
+// FRICTION, STOP_SPEED and BALL_R are all tuned at a 1160-tall design canvas (S = 1) and
+// rescaled by computeLayout() below - without that, the same absolute px/frame friction on
+// a phone-sized board would eat a much bigger fraction of the flight than on a desktop one,
+// silently drifting every mode's difficulty by device.
+let FRICTION = 0.3; // speed scrubbed off every 16ms frame, at S = 1
+let STOP_SPEED = 0.35; // below this the ball has come to rest, at S = 1
 const WALL_BOUNCE = 0.85; // energy kept bouncing off a wall (sides, and the one above ZONKE)
 const BOUNCE_SPREAD = 1.0; // how wide the wall can kick the ball off (radians either side)
 const POWER_MAX = 1.55; // 1.0 reaches row 10; past that is the ZONKE band, then the wall
-const BALL_R = 12;
+let BALL_R = 12;
 
 
 interface Mode {
@@ -36,6 +40,8 @@ interface Mode {
 // Two levers make ZONKE harder: the wall drops so there is less room to stop in above row
 // 10, and the bar charges faster so that room passes sooner. Measured windows are roughly
 // 365ms of a 1900ms charge on Easy, 156ms of 1300ms on Moderate, 65ms of 1000ms on Hard.
+// zonkeBand is tuned at S = 1 like the physics above, and read through wallY() which
+// applies the same scale factor, so the odds hold steady across screen sizes.
 const MODES: Mode[] = [
   { name: 'Easy', zonkeBand: 95, chargeMs: 1900, jitter: 0, cpuAim: 0.1, cpuError: 0.6 },
   { name: 'Moderate', zonkeBand: 55, chargeMs: 1300, jitter: 0.04, cpuAim: 0.45, cpuError: 0.18 },
@@ -49,31 +55,74 @@ const P2_COLOR_HEX = 0x2196f3;
 const KILL_COLOR = '#ff5252';
 const NEUTRAL_COLOR = '#888888';
 
-// Phaser fits the canvas to the window, so how big the board looks is really the board's
-// share of the canvas. Chrome is kept tight and the board given the rest.
-// Phaser fits the canvas to the window, so the board's share of the canvas is what decides
-// how big it looks. Height is the scarce axis - ten rows have to fit - so chrome above and
-// below is kept tight, while the table spends the width the screen has going spare.
-const CANVAS_W = 1500;
-const CENTER_X = CANVAS_W / 2;
-const CELL_W = 132;
-const GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
-const GRID_RIGHT = GRID_LEFT + ROWS.length * CELL_W;
-const HEADER_TOP = 10;
-const HEADER_H = 110;
-const ROW_H = 88; // full row height, sized so a figure fits between rows without crowding
+// The whole board is designed on a 1500x1160 canvas; every position below is expressed as
+// a fraction of that design and re-applied to whatever size Phaser actually hands the scene,
+// so the game fills the real device instead of being letterboxed or centred with dead space.
+// Width and height scale independently - the grid keeps the same share of the real width
+// (so player margins scale with a phone's narrow screen too), while S scales everything
+// vertical (rows, chrome, type, physics) off the real height, since ten rows have to fit
+// however tall or short the screen is.
+const DESIGN_W = 1500;
+const DESIGN_H = 1160;
+const DESIGN_GRID_W = 1056; // 8 columns x 132px in the original design
+
+let S = 1; // vertical/uniform scale: real height over the 1160 design height
+let CANVAS_W = DESIGN_W;
+let CENTER_X = CANVAS_W / 2;
+let CELL_W = 132;
+let GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
+let GRID_RIGHT = GRID_LEFT + ROWS.length * CELL_W;
+let HEADER_TOP = 10;
+let HEADER_H = 110;
+let ROW_H = 88; // full row height, sized so a figure fits between rows without crowding
 // The figures live out in the margins, one per row per side, lined up with the row centre.
-const FIGURE_X: [number, number] = [GRID_LEFT / 2, (GRID_RIGHT + CANVAS_W) / 2];
-const FIGURE_SCALE = 2.2;
-const SUB_H = ROW_H / 2;
+let FIGURE_X: [number, number] = [GRID_LEFT / 2, (GRID_RIGHT + CANVAS_W) / 2];
+let FIGURE_SCALE = 2.2;
+let SUB_H = ROW_H / 2;
 const MAX_VISIBLE_ROWS = 10;
-const LOG_TOP = HEADER_TOP + HEADER_H;
-const TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
+let LOG_TOP = HEADER_TOP + HEADER_H;
+let TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
 
 // Power maps straight onto height: 0 barely clears row 1, 1.0 puts the apex in the ZONKE
 // band, and anything past that drives the ball into the top line.
-const APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2; // centre of row 1
-const APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5); // travel from row 1 to just inside the ZONKE band
+let APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2; // centre of row 1
+let APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5); // travel from row 1 to just inside the ZONKE band
+
+/** Font-size helper: scales a design-space point size by S and rounds to a whole px string. */
+function fs(n: number): string {
+  return `${Math.max(1, Math.round(n * S))}px`;
+}
+
+/**
+ * Re-derives every layout constant above from the real canvas size Phaser gives the scene.
+ * Must run before anything else in create(), since every position in this file reads these.
+ */
+function computeLayout(width: number, height: number): void {
+  CANVAS_W = width;
+  S = height / DESIGN_H;
+
+  CENTER_X = CANVAS_W / 2;
+  CELL_W = (CANVAS_W * (DESIGN_GRID_W / DESIGN_W)) / ROWS.length;
+  GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
+  GRID_RIGHT = GRID_LEFT + ROWS.length * CELL_W;
+
+  HEADER_TOP = 10 * S;
+  HEADER_H = 110 * S;
+  ROW_H = 88 * S;
+  FIGURE_X = [GRID_LEFT / 2, (GRID_RIGHT + CANVAS_W) / 2];
+  FIGURE_SCALE = 2.2 * S;
+  SUB_H = ROW_H / 2;
+  LOG_TOP = HEADER_TOP + HEADER_H;
+  TABLE_BOTTOM = LOG_TOP + MAX_VISIBLE_ROWS * ROW_H;
+  APEX_FLOOR_Y = LOG_TOP + (MAX_VISIBLE_ROWS - 1) * ROW_H + ROW_H / 2;
+  APEX_SPAN = APEX_FLOOR_Y - (LOG_TOP - 5 * S);
+
+  // A ball sized for a big desktop board would swallow a phone's narrow columns, so it is
+  // also capped relative to CELL_W.
+  BALL_R = Math.min(12 * S, CELL_W * 0.4);
+  FRICTION = 0.3 * S;
+  STOP_SPEED = 0.35 * S;
+}
 
 
 
@@ -116,6 +165,9 @@ export class ZonkeScene extends Phaser.Scene {
   private mode: Mode | null = null; // null while the difficulty is still being chosen
   private modeUi: Phaser.GameObjects.GameObject[] = [];
   private bulletGfx!: Phaser.GameObjects.Graphics;
+  private laidOutW = 0;
+  private laidOutH = 0;
+  private resizePending = false;
 
   constructor() {
     super('ZonkeScene');
@@ -126,40 +178,46 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   create(): void {
+    computeLayout(this.scale.width, this.scale.height);
+    this.laidOutW = this.scale.width;
+    this.laidOutH = this.scale.height;
+    this.scale.on('resize', this.onScaleResize, this);
+    this.events.once('shutdown', () => this.scale.off('resize', this.onScaleResize, this));
+
     this.players = [createPlayer('Player 1'), createPlayer('CPU')];
     this.activeIndex = 0;
     this.resetBoard();
     this.gameOver = false;
 
-    this.add.text(FIGURE_X[0], 6, 'Player 1', { fontSize: '30px', color: P1_COLOR }).setOrigin(0.5, 0);
-    this.add.text(FIGURE_X[1], 6, 'CPU', { fontSize: '24px', color: P2_COLOR }).setOrigin(0.5, 0);
+    this.add.text(FIGURE_X[0], 6 * S, 'Player 1', { fontSize: fs(30), color: P1_COLOR }).setOrigin(0.5, 0);
+    this.add.text(FIGURE_X[1], 6 * S, 'CPU', { fontSize: fs(24), color: P2_COLOR }).setOrigin(0.5, 0);
 
     this.killTexts = [
-      this.add.text(FIGURE_X[0], 38, 'Kills: 0', { fontSize: '20px', color: '#ffd54f' }).setOrigin(0.5, 0),
-      this.add.text(FIGURE_X[1], 38, 'Kills: 0', { fontSize: '20px', color: '#ffd54f' }).setOrigin(0.5, 0),
+      this.add.text(FIGURE_X[0], 38 * S, 'Kills: 0', { fontSize: fs(20), color: '#ffd54f' }).setOrigin(0.5, 0),
+      this.add.text(FIGURE_X[1], 38 * S, 'Kills: 0', { fontSize: fs(20), color: '#ffd54f' }).setOrigin(0.5, 0),
     ];
 
     this.drawHeader();
     this.createCellPool();
 
-    this.ballRestY = TABLE_BOTTOM + 26;
+    this.ballRestY = TABLE_BOTTOM + 26 * S;
     this.ball = this.add.circle(0, 0, BALL_R, 0xffd54f);
     this.positionBallAtRest();
 
-    const turnY = this.ballRestY + 28;
+    const turnY = this.ballRestY + 28 * S;
     this.turnText = this.add
-      .text(CENTER_X, turnY, "Player 1's turn", { fontSize: '24px', color: P1_COLOR })
+      .text(CENTER_X, turnY, "Player 1's turn", { fontSize: fs(24), color: P1_COLOR })
       .setOrigin(0.5, 0);
 
     this.messageText = this.add
-      .text(CENTER_X, turnY + 32, 'Hold to charge, release to launch', {
-        fontSize: '21px',
+      .text(CENTER_X, turnY + 32 * S, 'Hold to charge, release to launch', {
+        fontSize: fs(21),
         color: '#cccccc',
       })
       .setOrigin(0.5, 0);
 
     this.gameOverText = this.add
-      .text(CENTER_X, turnY + 62, '', { fontSize: '28px', color: '#ffeb3b', fontStyle: 'bold' })
+      .text(CENTER_X, turnY + 62 * S, '', { fontSize: fs(28), color: '#ffeb3b', fontStyle: 'bold' })
       .setOrigin(0.5, 0);
 
 
@@ -201,10 +259,14 @@ export class ZonkeScene extends Phaser.Scene {
 
   private showModePicker(): void {
     const midY = (LOG_TOP + TABLE_BOTTOM) / 2;
-    const panel = this.add.rectangle(CENTER_X, midY, 720, 360, 0x000000, 0.88).setOrigin(0.5);
+    // The panel is sized off the design's proportions but never wider/taller than the real
+    // board, so it still fits on a narrow phone rather than overflowing the sides.
+    const panelW = Math.min(720 * S, CANVAS_W * 0.94);
+    const panelH = Math.min(360 * S, (TABLE_BOTTOM - LOG_TOP) * 0.9);
+    const panel = this.add.rectangle(CENTER_X, midY, panelW, panelH, 0x000000, 0.88).setOrigin(0.5);
     const title = this.add
-      .text(CENTER_X, midY - 150, 'Choose difficulty', {
-        fontSize: '34px',
+      .text(CENTER_X, midY - 150 * S, 'Choose difficulty', {
+        fontSize: fs(34),
         color: '#ffffff',
         fontStyle: 'bold',
       })
@@ -212,13 +274,13 @@ export class ZonkeScene extends Phaser.Scene {
     // Each option is a tappable button, not just a keyboard shortcut - sized generously
     // since this has to work as a touch target on a phone with no keyboard at all.
     const buttons = MODES.map((m, i) => {
-      const y = midY - 92 + i * 60;
+      const y = midY - 92 * S + i * 60 * S;
       const btn = this.add
-        .rectangle(CENTER_X, y + 18, 560, 52, 0xffffff, 0.06)
+        .rectangle(CENTER_X, y + 18 * S, Math.min(560 * S, panelW * 0.9), 52 * S, 0xffffff, 0.06)
         .setStrokeStyle(1, 0xffd54f, 0.5)
         .setInteractive({ useHandCursor: true });
       const label = this.add
-        .text(CENTER_X, y, `${i + 1}   ${m.name}`, { fontSize: '28px', color: '#ffd54f' })
+        .text(CENTER_X, y, `${i + 1}   ${m.name}`, { fontSize: fs(28), color: '#ffd54f' })
         .setOrigin(0.5, 0);
       btn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
         event.stopPropagation();
@@ -228,17 +290,17 @@ export class ZonkeScene extends Phaser.Scene {
     });
     const lines = buttons.flat();
     const hint = this.add
-      .text(CENTER_X, midY + 66, 'Harder modes charge faster and the CPU aims better', {
-        fontSize: '18px',
+      .text(CENTER_X, midY + 66 * S, 'Harder modes charge faster and the CPU aims better', {
+        fontSize: fs(18),
         color: '#aaaaaa',
       })
       .setOrigin(0.5, 0);
     const rules = this.add
       .text(
         CENTER_X,
-        midY + 104,
+        midY + 104 * S,
         'Land on a row to draw its figure. Once it holds a gun, each\nlanding steps its bullet one letter - past H it hits.',
-        { fontSize: '17px', color: '#888888', align: 'center', lineSpacing: 6 }
+        { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S }
       )
       .setOrigin(0.5, 0);
     this.modeUi = [panel, title, hint, rules, ...lines];
@@ -279,8 +341,8 @@ export class ZonkeScene extends Phaser.Scene {
       // Row position label: bottom row = 1, counting upward to MAX_VISIBLE_ROWS at the top.
       const rowNumber = MAX_VISIBLE_ROWS - r;
       this.add
-        .text(GRID_LEFT - 20, y + ROW_H / 2, String(rowNumber), {
-          fontSize: '20px',
+        .text(GRID_LEFT - 20 * S, y + ROW_H / 2, String(rowNumber), {
+          fontSize: fs(20),
           color: '#777777',
         })
         .setOrigin(1, 0.5);
@@ -289,8 +351,8 @@ export class ZonkeScene extends Phaser.Scene {
     // The header row IS the ZONKE row - "ZONKE" sits on its own line on top, bigger and clear
     // of the column letters/numbers stacked below it, so nothing overlaps.
     this.add
-      .text(GRID_LEFT + tableWidth / 2, HEADER_TOP + 8, 'ZONKE', {
-        fontSize: '42px',
+      .text(GRID_LEFT + tableWidth / 2, HEADER_TOP + 8 * S, 'ZONKE', {
+        fontSize: fs(42),
         color: '#ffd54f',
         fontStyle: 'bold',
       })
@@ -300,8 +362,8 @@ export class ZonkeScene extends Phaser.Scene {
       const cx = GRID_LEFT + i * CELL_W + CELL_W / 2;
       const isLast = i === ROWS.length - 1;
       this.add
-        .text(cx, HEADER_TOP + 64, row, {
-          fontSize: '30px',
+        .text(cx, HEADER_TOP + 64 * S, row, {
+          fontSize: fs(30),
           color: isLast ? KILL_COLOR : '#ffffff',
           fontStyle: 'bold',
         })
@@ -317,12 +379,12 @@ export class ZonkeScene extends Phaser.Scene {
       const subPools: Phaser.GameObjects.Text[][] = [];
       const miniRow: Phaser.GameObjects.Graphics[] = [];
       [0, 1].forEach((sub) => {
-        const y = rowY + sub * SUB_H + 4;
+        const y = rowY + sub * SUB_H + 4 * S;
         const subTexts: Phaser.GameObjects.Text[] = [];
         ROWS.forEach((_row, i) => {
           const cx = GRID_LEFT + i * CELL_W + CELL_W / 2;
           const t = this.add
-            .text(cx, y, '', { fontSize: '26px', color: NEUTRAL_COLOR })
+            .text(cx, y, '', { fontSize: fs(26), color: NEUTRAL_COLOR })
             .setOrigin(0.5, 0);
           subTexts.push(t);
         });
@@ -496,7 +558,7 @@ export class ZonkeScene extends Phaser.Scene {
 
   /** The wall the ball bounces off: the band's top, never above the board's own top edge. */
   private wallY(): number {
-    return Math.max(LOG_TOP - this.mode!.zonkeBand, HEADER_TOP + BALL_R);
+    return Math.max(LOG_TOP - this.mode!.zonkeBand * S, HEADER_TOP + BALL_R);
   }
 
   private highlightColumnUnderBall(): void {
@@ -646,6 +708,22 @@ export class ZonkeScene extends Phaser.Scene {
   private restartGame(): void {
     if (!this.gameOver) return;
     this.scene.restart({ mode: this.mode });
+  }
+
+  /**
+   * The board's own layout is derived from the canvas size, so there is no cheap way to
+   * relayout in place - a resize (rotating the phone, resizing the browser window) restarts
+   * the round instead, keeping the chosen difficulty. Small size changes (mobile toolbars
+   * showing/hiding as the page scrolls) are ignored so those don't reset an in-progress game.
+   */
+  private onScaleResize(gameSize: { width: number; height: number }): void {
+    const dw = Math.abs(gameSize.width - this.laidOutW);
+    const dh = Math.abs(gameSize.height - this.laidOutH);
+    if (this.resizePending || (dw < 60 && dh < 60)) return;
+    this.resizePending = true;
+    this.time.delayedCall(150, () => {
+      this.scene.restart({ mode: this.mode });
+    });
   }
 
   private redrawAll(): void {
