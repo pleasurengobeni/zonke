@@ -68,6 +68,7 @@ const DESIGN_GRID_W = 1056; // 8 columns x 132px in the original design
 
 let S = 1; // vertical/uniform scale: real height over the 1160 design height
 let CANVAS_W = DESIGN_W;
+let CANVAS_H = DESIGN_H;
 let CENTER_X = CANVAS_W / 2;
 let CELL_W = 132;
 let GRID_LEFT = CENTER_X - (ROWS.length * CELL_W) / 2;
@@ -99,6 +100,7 @@ function fs(n: number): string {
  */
 function computeLayout(width: number, height: number): void {
   CANVAS_W = width;
+  CANVAS_H = height;
   S = height / DESIGN_H;
 
   CENTER_X = CANVAS_W / 2;
@@ -122,6 +124,36 @@ function computeLayout(width: number, height: number): void {
   BALL_R = Math.min(12 * S, CELL_W * 0.4);
   FRICTION = 0.3 * S;
   STOP_SPEED = 0.35 * S;
+
+  // The margin each side actually has to work with, once the grid claims the middle.
+  MARGIN_L = GRID_LEFT;
+  MARGIN_R = CANVAS_W - GRID_RIGHT;
+  // A figure's widest point in drawMiniFigure() is ~21 design units from centre - never let
+  // it overflow past its own margin into the grid or off the edge of the canvas.
+  FIGURE_SCALE = Math.min(FIGURE_SCALE, (Math.min(MARGIN_L, MARGIN_R) / 2 - 6 * S) / 21);
+}
+
+let MARGIN_L = 0;
+let MARGIN_R = 0;
+
+/**
+ * Shrinks a text object's font size until it fits within maxWidth, instead of trusting a
+ * fixed fraction of screen width to always be enough room - the failure mode of that was a
+ * label like "Player 1" clipping off the edge of a narrow phone. Falls back to shortLabel
+ * (e.g. "P1") if it still won't fit at a legible size.
+ */
+function fitLabel(text: Phaser.GameObjects.Text, maxWidth: number, shortLabel?: string): void {
+  const minPx = 11;
+  while (text.width > maxWidth && text.style.fontSize && parseInt(text.style.fontSize as string, 10) > minPx) {
+    const next = parseInt(text.style.fontSize as string, 10) - 1;
+    text.setFontSize(next);
+  }
+  if (text.width > maxWidth && shortLabel) {
+    text.setText(shortLabel);
+    while (text.width > maxWidth && parseInt(text.style.fontSize as string, 10) > minPx) {
+      text.setFontSize(parseInt(text.style.fontSize as string, 10) - 1);
+    }
+  }
 }
 
 
@@ -189,13 +221,25 @@ export class ZonkeScene extends Phaser.Scene {
     this.resetBoard();
     this.gameOver = false;
 
-    this.add.text(FIGURE_X[0], 6 * S, 'Player 1', { fontSize: fs(30), color: P1_COLOR }).setOrigin(0.5, 0);
-    this.add.text(FIGURE_X[1], 6 * S, 'CPU', { fontSize: fs(24), color: P2_COLOR }).setOrigin(0.5, 0);
+    // Each margin label is measured and shrunk (or abbreviated) to actually fit the
+    // margin it sits in, rather than trusting that a fraction of screen width is always
+    // wide enough - that assumption is what clipped "Player 1" to "layer 1" on a phone.
+    const gutter = 6 * S;
+    const nameL = this.add
+      .text(FIGURE_X[0], 6 * S, 'Player 1', { fontSize: fs(30), color: P1_COLOR })
+      .setOrigin(0.5, 0);
+    fitLabel(nameL, MARGIN_L - gutter * 2, 'P1');
+    const nameR = this.add
+      .text(FIGURE_X[1], 6 * S, 'CPU', { fontSize: fs(24), color: P2_COLOR })
+      .setOrigin(0.5, 0);
+    fitLabel(nameR, MARGIN_R - gutter * 2);
 
     this.killTexts = [
       this.add.text(FIGURE_X[0], 38 * S, 'Kills: 0', { fontSize: fs(20), color: '#ffd54f' }).setOrigin(0.5, 0),
       this.add.text(FIGURE_X[1], 38 * S, 'Kills: 0', { fontSize: fs(20), color: '#ffd54f' }).setOrigin(0.5, 0),
     ];
+    fitLabel(this.killTexts[0], MARGIN_L - gutter * 2);
+    fitLabel(this.killTexts[1], MARGIN_R - gutter * 2);
 
     this.drawHeader();
     this.createCellPool();
@@ -258,52 +302,112 @@ export class ZonkeScene extends Phaser.Scene {
   }
 
   private showModePicker(): void {
-    const midY = (LOG_TOP + TABLE_BOTTOM) / 2;
-    // The panel is sized off the design's proportions but never wider/taller than the real
-    // board, so it still fits on a narrow phone rather than overflowing the sides.
-    const panelW = Math.min(720 * S, CANVAS_W * 0.94);
-    const panelH = Math.min(360 * S, (TABLE_BOTTOM - LOG_TOP) * 0.9);
-    const panel = this.add.rectangle(CENTER_X, midY, panelW, panelH, 0x000000, 0.88).setOrigin(0.5);
+    // Built as a top-down stack, each block placed from the ACTUAL measured height of the
+    // one before it - not fixed offsets guessed at one screen size. That is what the old
+    // version got wrong: a hint line that happened to wrap to two lines on a narrow phone
+    // had no extra room reserved for it, so it overlapped the block below it. Word-wrapping
+    // long lines to the panel's own width, instead of relying on a hand-picked line break,
+    // is the other half of the same fix.
+    const availW = CANVAS_W * 0.94;
+    const availH = CANVAS_H * 0.94;
+    const panelW = Math.min(720 * S, availW);
+    const textW = panelW - 48 * S;
+    const gap = 14 * S;
+
     const title = this.add
-      .text(CENTER_X, midY - 150 * S, 'Choose difficulty', {
-        fontSize: fs(34),
-        color: '#ffffff',
-        fontStyle: 'bold',
-      })
+      .text(CENTER_X, 0, 'Choose difficulty', { fontSize: fs(34), color: '#ffffff', fontStyle: 'bold' })
       .setOrigin(0.5, 0);
-    // Each option is a tappable button, not just a keyboard shortcut - sized generously
-    // since this has to work as a touch target on a phone with no keyboard at all.
-    const buttons = MODES.map((m, i) => {
-      const y = midY - 92 * S + i * 60 * S;
+
+    const btnW = Math.min(560 * S, panelW * 0.9);
+    const btnH = 52 * S;
+    const buttonPairs = MODES.map((m, i) => {
       const btn = this.add
-        .rectangle(CENTER_X, y + 18 * S, Math.min(560 * S, panelW * 0.9), 52 * S, 0xffffff, 0.06)
+        .rectangle(CENTER_X, 0, btnW, btnH, 0xffffff, 0.06)
         .setStrokeStyle(1, 0xffd54f, 0.5)
         .setInteractive({ useHandCursor: true });
       const label = this.add
-        .text(CENTER_X, y, `${i + 1}   ${m.name}`, { fontSize: fs(28), color: '#ffd54f' })
-        .setOrigin(0.5, 0);
+        .text(CENTER_X, 0, `${i + 1}   ${m.name}`, { fontSize: fs(28), color: '#ffd54f' })
+        .setOrigin(0.5, 0.5);
       btn.on('pointerdown', (_p: unknown, _x: unknown, _y: unknown, event: { stopPropagation: () => void }) => {
         event.stopPropagation();
         this.chooseMode(i);
       });
-      return [btn, label];
+      return { btn, label };
     });
-    const lines = buttons.flat();
+
     const hint = this.add
-      .text(CENTER_X, midY + 66 * S, 'Harder modes charge faster and the CPU aims better', {
+      .text(CENTER_X, 0, 'Harder modes charge faster and the CPU aims better', {
         fontSize: fs(18),
         color: '#aaaaaa',
+        align: 'center',
+        wordWrap: { width: textW },
       })
       .setOrigin(0.5, 0);
+
     const rules = this.add
       .text(
         CENTER_X,
-        midY + 104 * S,
-        'Land on a row to draw its figure. Once it holds a gun, each\nlanding steps its bullet one letter - past H it hits.',
-        { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S }
+        0,
+        'Land on a row to draw its figure. Once it holds a gun, each landing steps its bullet one letter - past H it hits.',
+        { fontSize: fs(17), color: '#888888', align: 'center', lineSpacing: 6 * S, wordWrap: { width: textW } }
       )
       .setOrigin(0.5, 0);
-    this.modeUi = [panel, title, hint, rules, ...lines];
+
+    // Stack everything from a running cursor, then find out how tall the whole thing
+    // actually turned out to be once wrapping and font-fit have had their say. If it still
+    // doesn't fit the screen, shrink every piece by the same factor and lay it out again -
+    // once - rather than let the panel clip its own last line.
+    let btnHeight = btnH;
+    let curGap = gap;
+    const stack = (): number => {
+      let cy = 0;
+      title.setY(cy);
+      cy += title.height + curGap * 1.4;
+      buttonPairs.forEach(({ btn, label }) => {
+        btn.setY(cy + btnHeight / 2);
+        label.setY(cy + btnHeight / 2);
+        cy += btnHeight + curGap * 0.5;
+      });
+      cy += curGap * 0.6;
+      hint.setY(cy);
+      cy += hint.height + curGap * 0.5;
+      rules.setY(cy);
+      cy += rules.height;
+      return cy;
+    };
+
+    let contentH = stack();
+    if (contentH + 48 * S > availH) {
+      const shrink = Phaser.Math.Clamp((availH - 48 * S) / contentH, 0.55, 1);
+      [title, hint, rules, ...buttonPairs.map((p) => p.label)].forEach((t) =>
+        t.setFontSize(Math.max(10, Math.round(parseInt(t.style.fontSize as string, 10) * shrink)))
+      );
+      btnHeight *= shrink;
+      curGap *= shrink;
+      buttonPairs.forEach(({ btn }) => btn.setSize(btn.width, btnHeight));
+      contentH = stack();
+    }
+
+    const panelH = Math.min(contentH + 48 * S, availH);
+    const midY = CANVAS_H / 2;
+    const startY = midY - contentH / 2;
+
+    // Shift the whole stack from the relative coordinates it was built in down to its
+    // actual position, now that the total height is known.
+    title.setY(title.y + startY);
+    buttonPairs.forEach(({ btn, label }) => {
+      btn.setY(btn.y + startY);
+      label.setY(label.y + startY);
+    });
+    hint.setY(hint.y + startY);
+    rules.setY(rules.y + startY);
+
+    const panel = this.add.rectangle(CENTER_X, midY, panelW, panelH, 0x000000, 0.88).setOrigin(0.5);
+
+    [title, hint, rules, ...buttonPairs.flatMap((p) => [p.btn, p.label])].forEach((o) =>
+      o.setDepth(1)
+    );
+    this.modeUi = [panel, title, hint, rules, ...buttonPairs.flatMap((p) => [p.btn, p.label])];
     this.turnText.setText('');
     this.messageText.setText('');
   }
