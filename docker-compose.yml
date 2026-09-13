@@ -1,0 +1,27 @@
+services:
+  web:
+    build: .
+    image: zonkegame-web
+    container_name: zonkegame-web
+    restart: unless-stopped
+    # Bound to localhost only - matches every other app on this host. The host nginx is
+    # the sole internet-facing hop; nothing here is ever reachable from 0.0.0.0 directly.
+    ports:
+      - "127.0.0.1:8090:8080"
+    # Hardening: no capability this static file server needs beyond binding its own
+    # unprivileged port, no privilege escalation path, and a read-only root filesystem
+    # with just the few paths nginx actually needs to write to mounted as tmpfs.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
