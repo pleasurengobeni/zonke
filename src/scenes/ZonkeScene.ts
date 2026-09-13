@@ -907,34 +907,55 @@ export class ZonkeScene extends Phaser.Scene {
     scale = 1
   ): void {
     g.clear();
-    g.lineStyle(2, sub === 0 ? P1_COLOR_HEX : P2_COLOR_HEX, 1);
+    const color = sub === 0 ? P1_COLOR_HEX : P2_COLOR_HEX;
     // Player 2's figure is a mirror image of player 1's (gun arm points the other way).
     const m = (sub === 0 ? 1 : -1) * scale;
     const v = scale; // vertical scale
+    // Limbs scale as filled quads, not hairlines - a flat 2px stroke stayed spindly next to
+    // a head/torso that grow with FIGURE_SCALE, which is a lot of why this looked thin.
+    const lineW = Math.max(1.5, 2.4 * v);
+    g.lineStyle(lineW, color, 1);
+    g.fillStyle(color, 1);
 
     const has = (part: (typeof FIGURE_PARTS)[number]) => drawnParts[FIGURE_PARTS.indexOf(part)];
 
-    if (has('head')) {
-      g.strokeCircle(x, y - 12 * v, 5 * v);
-    }
+    // A filled torso block instead of a bare spine line - reads as a body at small sizes
+    // where a single-pixel line all but disappears.
     if (has('spine')) {
-      g.lineBetween(x, y - 7 * v, x, y + 8 * v);
+      g.fillRoundedRect(x - 2.6 * v, y - 7 * v, 5.2 * v, 15 * v, 1.6 * v);
+    }
+    if (has('head')) {
+      g.fillCircle(x, y - 13 * v, 5.2 * v);
     }
     if (has('leftArm')) {
-      g.lineBetween(x, y - 3 * v, x - 9 * m, y + 5 * v);
+      g.lineBetween(x - 1.6 * v, y - 5 * v, x - 9 * m, y + 4 * v);
     }
     if (has('rightArm')) {
-      g.lineBetween(x, y - 3 * v, x + 10 * m, y - 5 * v);
+      g.lineBetween(x + 1.6 * v, y - 5 * v, x + 10 * m, y - 5 * v);
     }
     if (has('leftLeg')) {
-      g.lineBetween(x, y + 8 * v, x - 8 * m, y + 18 * v);
+      g.lineBetween(x - 1.6 * v, y + 8 * v, x - 8 * m, y + 19 * v);
     }
     if (has('rightLeg')) {
-      g.lineBetween(x, y + 8 * v, x + 10 * m, y + 16 * v);
+      g.lineBetween(x + 1.6 * v, y + 8 * v, x + 8 * m, y + 19 * v);
     }
     if (has('gun')) {
-      g.strokeRect(x + 10 * m - (m < 0 ? 5 * v : 0), y - 8 * v, 5 * v, 3 * v);
-      g.strokeRect(x + 13 * m - (m < 0 ? 3 * v : 0), y - 6 * v, 3 * v, 4 * v);
+      // A recognisable pistol silhouette - barrel plus grip - held at the gun hand and
+      // pointed the direction this player actually shoots, not two floating boxes. Drawn
+      // in a neutral gunmetal fill with a dark outline rather than the body's own colour -
+      // solid-on-solid, it read as a bent arm rather than a held object.
+      const hx = x + 10 * m;
+      const hy = y - 5 * v;
+      const barrelW = 13 * m;
+      const barrelH = 3.4 * v;
+      const gripW = 3 * m;
+      const gripH = 6.4 * v;
+      g.fillStyle(0xe4e4e4, 1);
+      g.fillRect(hx, hy - barrelH / 2, barrelW, barrelH);
+      g.fillRect(hx - 1 * m, hy - 0.4 * v, gripW, gripH);
+      g.lineStyle(Math.max(1, 1.1 * v), 0x1a1a1a, 0.9);
+      g.strokeRect(hx, hy - barrelH / 2, barrelW, barrelH);
+      g.strokeRect(hx - 1 * m, hy - 0.4 * v, gripW, gripH);
     }
   }
 }
