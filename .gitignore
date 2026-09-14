@@ -2,3 +2,6 @@ node_modules
 dist
 .DS_Store
 *.log
+api/node_modules
+api/dist
+api/data

@@ -1,5 +1,9 @@
 import Phaser from 'phaser';
 import { ZonkeScene } from './scenes/ZonkeScene';
+import { TimeAttackScene } from './scenes/TimeAttackScene';
+import { track } from './analytics';
+
+track('page_view');
 
 // innerWidth/Height is what correctly tracks the real CSS viewport in every case that
 // matters here, including Chrome DevTools' device emulation - visualViewport is meant for
@@ -22,7 +26,7 @@ const config: Phaser.Types.Core.GameConfig = {
     mode: Phaser.Scale.RESIZE,
     autoRound: true,
   },
-  scene: [ZonkeScene],
+  scene: [ZonkeScene, TimeAttackScene],
 };
 
 new Phaser.Game(config);
