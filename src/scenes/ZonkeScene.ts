@@ -23,7 +23,7 @@ import {
 let FRICTION = 0.3; // speed scrubbed off every 16ms frame, at S = 1
 let STOP_SPEED = 0.35; // below this the ball has come to rest, at S = 1
 const WALL_BOUNCE = 0.85; // energy kept bouncing off a wall (sides, and the one above ZONKE)
-const BOUNCE_SPREAD = 1.0; // how wide the wall can kick the ball off (radians either side)
+const BOUNCE_SPREAD = 0.15; // how wide the wall can kick the ball off (radians either side)
 const POWER_MAX = 1.55; // 1.0 reaches row 10; past that is the ZONKE band, then the wall
 let BALL_R = 12;
 
