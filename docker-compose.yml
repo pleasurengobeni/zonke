@@ -20,6 +20,13 @@ services:
       - /tmp
       - /var/cache/nginx
       - /var/run
+    # Resource ceilings: this host also runs LulamisaPay, hungu and xwall on ~4 GB of
+    # RAM. A runaway here must hit its own limit, not push the kernel into killing
+    # someone else's process. Static nginx idles around 6 MB.
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 64
+    cpus: 0.5
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/"]
       interval: 30s
@@ -41,6 +48,11 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Same reasoning as web. Node + SQLite idles around 25 MB.
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 128
+    cpus: 1.0
     # Named volume, not a bind mount or the container's own writable layer - `docker
     # compose up -d --build` on every deploy recreates the container from scratch, which
     # would silently wipe the SQLite file (scores and every collected stat) without this.
